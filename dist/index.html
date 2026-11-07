@@ -150,10 +150,17 @@ kbd { font: 500 11px var(--mono); padding: 1px 5px; border: 1px solid var(--line
   .viewport { height: clamp(300px, 52vh, 520px); }
   .mlist { max-height: 300px; }
 }
-.angform{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;margin-bottom:10px;font-size:12px}
+.angform{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;margin-bottom:10px;font-size:12px;padding:10px 12px 0}
 .angform label{display:flex;flex-direction:column;gap:2px;color:var(--fg-2)}
 .angform label.wide{grid-column:1/-1;flex-direction:row;align-items:center;gap:6px}
-.angform input[type=number]{width:100%;min-width:0;font:inherit;padding:4px 6px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--fg)}
+.angform input[type=number],.angform select{width:100%;min-width:0;font:inherit;padding:4px 6px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--fg)}
+.card-acts{display:flex;flex-wrap:wrap;gap:6px;padding:0 12px 10px}
+.card-acts .btn{flex:1 1 auto}
+.anthro-summary{margin:0 12px 10px;padding:8px 10px;border-radius:4px;border:1px solid var(--line);background:var(--bg);font-size:11.5px;line-height:1.5;color:var(--fg-2)}
+.anthro-row{display:flex;justify-content:space-between;gap:8px;margin-bottom:2px}
+.anthro-row:last-child{margin-bottom:0}
+.anthro-row strong{color:var(--fg);font-family:var(--mono)}
+.anthro-row span:last-child{font-family:var(--mono)}
 #jsel{font:inherit;font-size:12px;margin-left:6px}
 .fapanel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 12px; }
 .fahead { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; margin-bottom: 10px; }
@@ -331,21 +338,46 @@ kbd { font: 500 11px var(--mono); padding: 1px 5px; border: 1px solid var(--line
         <dl class="info" id="info"></dl>
         <p class="note" id="note" hidden></p>
       </section>
+      <section class="card" aria-labelledby="hSubj">
+        <h2 id="hSubj">ผู้ทดสอบ & สัดส่วน (Anthropometry)</h2>
+        <div class="angform">
+          <label>ส่วนสูง (cm) <input id="subH" type="number" min="50" max="250" step="0.5" value="170.0" placeholder="170"></label>
+          <label>น้ำหนัก (kg) <input id="subM" type="number" min="20" max="250" step="0.5" value="70.0" placeholder="70"></label>
+          <label>เพศ
+            <select id="subSex">
+              <option value="M" selected>ชาย (M)</option>
+              <option value="F">หญิง (F)</option>
+            </select>
+          </label>
+          <label>Marker R (m) <input id="subMR" type="number" step="0.001" value="0.007"></label>
+        </div>
+        <div class="card-acts">
+          <button id="bApplyAnthro" class="btn primary sm" type="button">ประมาณการและนำไปใช้</button>
+        </div>
+        <div id="anthroSummary" class="anthro-summary">
+          <div class="anthro-row"><span>Knee width (est.):</span><strong id="lblKneeW">0.099 m</strong></div>
+          <div class="anthro-row"><span>Ankle width (est.):</span><strong id="lblAnkleW">0.070 m</strong></div>
+          <div class="anthro-row"><span>Thigh / Shank:</span><span id="lblLegL">0.42 / 0.42 m</span></div>
+          <div class="anthro-row"><span>Segment mass:</span><span id="lblLegM">Thigh 9.9 · Shank 3.0 kg</span></div>
+        </div>
+      </section>
       <section class="card" aria-labelledby="hAng">
         <h2 id="hAng">มุมข้อต่อ (แบบ V3D)</h2>
         <div class="angform">
           <label>Static: frame เริ่ม <input id="aS0" type="number" min="0" value="0"></label>
           <label>จำนวน frame <input id="aSN" type="number" min="1" value="10"></label>
-          <label>Knee width R (m) <input id="aKR" type="number" step="0.001" value="0.100"></label>
-          <label>Knee width L (m) <input id="aKL" type="number" step="0.001" value="0.100"></label>
+          <label>Knee width R (m) <input id="aKR" type="number" step="0.001" value="0.099"></label>
+          <label>Knee width L (m) <input id="aKL" type="number" step="0.001" value="0.099"></label>
           <label>Ankle width R (m) <input id="aAR" type="number" step="0.001" value="0.070"></label>
           <label>Ankle width L (m) <input id="aAL" type="number" step="0.001" value="0.070"></label>
           <label>Marker radius (m) <input id="aMR" type="number" step="0.001" value="0.007"></label>
           <label class="wide"><input id="aNorm" type="checkbox"> ลบค่าเฉลี่ยช่วง static (zero offset)</label>
         </div>
-        <button id="bAng" class="btn primary" type="button">คำนวณมุมข้อต่อ</button>
-        <button id="bCsv" class="btn" type="button" disabled>ส่งออก CSV</button>
-        <p class="note" id="angNote">Cardan Z-X-Y · X=flex/ext, Y=ab/adduction, Z=axial · ค่า width เป็น placeholder ต้องวัดจริง · ยังไม่เทียบกับ Visual3D</p>
+        <div class="card-acts">
+          <button id="bAng" class="btn primary" type="button">คำนวณมุมข้อต่อ</button>
+          <button id="bCsv" class="btn" type="button" disabled>ส่งออก CSV</button>
+        </div>
+        <p class="note" id="angNote">Cardan Z-X-Y · X=flex/ext, Y=ab/adduction, Z=axial · ปรับค่า width จาก Anthropometry หรือกรอกค่าจริง</p>
       </section>
       <section class="card" aria-labelledby="hMk">
         <h2 id="hMk">Marker</h2>
@@ -1357,6 +1389,56 @@ const LB_MARKERS = ['LASI', 'RASI', 'LPSI', 'RPSI', 'LKNE', 'RKNE', 'LTHI', 'RTH
 const LB_DEFAULTS = { kneeW: 0.10, ankleW: 0.07, markerR: 0.007, staticStart: 0, staticN: 10, normalize: false };
 const LB_JOINTS = [['RHip', 'RTH', 'RPV'], ['RKnee', 'RSK', 'RTH'], ['RAnkle', 'RFT', 'RSK'], ['LHip', 'LTH', 'RPV'], ['LKnee', 'LSK', 'LTH'], ['LAnkle', 'LFT', 'LSK']];
 
+/* ---------------------------------------------------------------- Anthropometry estimation
+   Based on regression equations from Winter (2009), Drillis & Contini (1966), and De Leva (1996):
+   - Knee width (bicondylar diameter): Male ~0.058*H, Female ~0.055*H
+   - Ankle width (bimalleolar diameter): Male ~0.041*H, Female ~0.038*H
+   - Nominal ASIS distance: Male ~0.136*H, Female ~0.148*H
+   - Segment lengths (Thigh 0.245*H, Shank 0.246*H, Foot 0.152*H)
+   - Segment masses (De Leva 1996 percentages of total body mass)
+----------------------------------------------------------------------------------------- */
+function estimateAnthropometry(heightM, massKg, sex) {
+  const isF = String(sex || 'M').toUpperCase().startsWith('F');
+  const H = Math.max(0.5, Math.min(2.5, +(heightM || 1.70)));
+  const M = Math.max(20, Math.min(300, +(massKg || 70)));
+
+  const kneeW = isF ? 0.055 * H : 0.058 * H;
+  const ankleW = isF ? 0.038 * H : 0.041 * H;
+  const asisDist = isF ? 0.148 * H : 0.136 * H;
+
+  const thighL = 0.245 * H;
+  const shankL = 0.246 * H;
+  const footL = 0.152 * H;
+
+  // De Leva (1996) segment mass ratios
+  const thighMass = M * (isF ? 0.1478 : 0.1416);
+  const shankMass = M * (isF ? 0.0481 : 0.0433);
+  const footMass = M * (isF ? 0.0129 : 0.0137);
+  const pelvisMass = M * (isF ? 0.1247 : 0.1117);
+  const trunkMass = M * (isF ? 0.4257 : 0.4346);
+
+  return {
+    heightM: H,
+    massKg: M,
+    sex: isF ? 'F' : 'M',
+    kneeW: +kneeW.toFixed(4),
+    ankleW: +ankleW.toFixed(4),
+    asisDist: +asisDist.toFixed(4),
+    lengths: {
+      thigh: +thighL.toFixed(4),
+      shank: +shankL.toFixed(4),
+      foot: +footL.toFixed(4)
+    },
+    masses: {
+      thigh: +thighMass.toFixed(2),
+      shank: +shankMass.toFixed(2),
+      foot: +footMass.toFixed(2),
+      pelvis: +pelvisMass.toFixed(2),
+      trunk: +trunkMass.toFixed(2)
+    }
+  };
+}
+
 function computeLowerBody(ds, params) {
   const p = Object.assign({}, LB_DEFAULTS, params || {});
   const kw = s => (p.kneeW && typeof p.kneeW === 'object') ? p.kneeW[s] : p.kneeW, aw = s => (p.ankleW && typeof p.ankleW === 'object') ? p.ankleW[s] : p.ankleW;
@@ -1463,7 +1545,7 @@ function computeLowerBody(ds, params) {
   for (const jn in gimbal) if (gimbal[jn] > 75) warnings.push(jn + ': มุมแกนกลาง (ab/adduction) สูงสุด ' + gimbal[jn].toFixed(0) + '° ใกล้ gimbal lock ค่ามุมสามแกนอาจไม่น่าเชื่อถือ');
   const ranges = {};
   for (const jn in out.angles) { ranges[jn] = {}; for (const c of ['a', 'b', 'g']) { let lo = Infinity, hi = -Infinity; for (let f = 0; f < nF; f++) { const v = out.angles[jn][c][f]; if (v === v) { if (v < lo) lo = v; if (v > hi) hi = v; } } ranges[jn][c] = [lo, hi]; } }
-  return { ok: true, params: p, warnings, angles: out.angles, frames: out.frames, jc: out.jc, ranges, upTilt, staticMove: maxMove, landmarks: L, staticRange: [s0, s1 - 1], asisDistance: D, segNames };
+  return { ok: true, params: p, anthro: p.anthro || null, warnings, angles: out.angles, frames: out.frames, jc: out.jc, ranges, upTilt, staticMove: maxMove, landmarks: L, staticRange: [s0, s1 - 1], asisDistance: D, segNames };
 }
 
 /* ---------------------------------------------------------------- Force-analysis engine
@@ -1811,7 +1893,7 @@ const FA = (() => {
   return { butter, filtfilt, butterLowpass, findQuietWindow, detectPhases, calcMetrics, landingImpact, impactRows, analyzePlates, G };
 })();
 
-const api = { FA, computeLowerBody, rigidFit, cardanZXY, rotZXY, LB_JOINTS, LB_DEFAULTS, readC3D, makeSyntheticCMJ, defaultLinks, splitLabel, sideOf, validRatio, MocapViewer, ChartView, AXIS, SIDE_COLOR, finishDataset };
+const api = { FA, computeLowerBody, estimateAnthropometry, rigidFit, cardanZXY, rotZXY, LB_JOINTS, LB_DEFAULTS, readC3D, makeSyntheticCMJ, defaultLinks, splitLabel, sideOf, validRatio, MocapViewer, ChartView, AXIS, SIDE_COLOR, finishDataset };
 if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.MocapEngine = api;
 })(typeof window !== 'undefined' ? window : globalThis);
 
@@ -1823,7 +1905,8 @@ try { const s = localStorage.getItem('primalab.lang'); if (s === 'en' || s === '
 const I18N_EXACT = {
   'วน': 'Loop', 'ปิด': 'Off', 'ทั้งหมด': 'All', 'ไม่เลือก': 'None', 'ขนาด': 'Size', 'ไฟล์': 'File', 'ชื่อ': 'Name', 'ความถี่': 'Rate', 'เฟรม': 'Frames',
   'รวม': 'Total', 'ซ้าย': 'Left', 'ขวา': 'Right', 'เล่น': 'Play', 'ไม่แสดง': 'None', 'เมนู': 'Menu', '◧ เมนู': '◧ Menu', '◨ เมนู': '◨ Menu', 'ไม่พบ': 'Not found',
-  'ความเร็ว': 'Speed', 'Fz รวม': 'Fz total', 'ความเร็ว COM': 'COM velocity', 'เลือก': 'Select'
+  'ความเร็ว': 'Speed', 'Fz รวม': 'Fz total', 'ความเร็ว COM': 'COM velocity', 'เลือก': 'Select',
+  'ส่วนสูง (cm)': 'Height (cm)', 'น้ำหนัก (kg)': 'Weight (kg)', 'เพศ': 'Sex', 'ชาย': 'Male', 'หญิง': 'Female', 'ชาย (M)': 'Male (M)', 'หญิง (F)': 'Female (F)'
 };
 const I18N_FRAG = [
   ['หน่วยเมตร', 'units: metres'], ['ข้อมูลสังเคราะห์', 'Synthetic data'], ['โหลดตัวอย่าง', 'Load sample'], ['เปิดไฟล์ C3D', 'Open C3D file'],
@@ -1836,6 +1919,11 @@ const I18N_FRAG = [
   ['คลิก marker สองตัวเพื่อเพิ่มหรือลบ link', 'Click two markers to add or remove a link'], ['กลับไปใช้ link อัตโนมัติจากชื่อ marker', 'Revert to automatic links from marker names'],
   ['โหมดแก้ไข link: คลิก marker สองตัวเพื่อเพิ่มหรือลบ link (Esc = ออก)', 'Link edit mode: click two markers to add or remove a link (Esc = exit)'],
   ['ควบคุมเวลา', 'Playback controls'], ['เฟรมก่อนหน้า', 'Previous frame'], ['เฟรมถัดไป', 'Next frame'], ['เล่น/หยุด', 'Play/Pause'], ['หยุดชั่วคราว', 'Pause'], ['ตำแหน่งเฟรม', 'Frame position'],
+  ['ผู้ทดสอบ & สัดส่วน (Anthropometry)', 'Subject & Anthropometry'], ['ผู้ทดสอบ & สัดส่วน', 'Subject & Anthropometry'],
+  ['ประมาณการและนำไปใช้', 'Estimate & Apply'], ['ส่วนสูง (cm)', 'Height (cm)'], ['น้ำหนัก (kg)', 'Weight (kg)'],
+  ['นำสัดส่วน Anthropometry', 'Applied anthropometry'], ['ไปปรับค่าโมเดลเรียบร้อย', 'to model successfully'],
+  ['ปรับค่า width จาก Anthropometry หรือกรอกค่าจริง', 'Adjust width from Anthropometry or enter measured values'],
+  ['สัดส่วนโมเดล: ', 'Model dimensions: '],
   ['มุมข้อต่อ (แบบ V3D)', 'Joint angles (V3D-style)'], ['คำนวณมุมข้อต่อ', 'Compute joint angles'], ['มุมข้อต่อ', 'Joint angles'], ['ส่งออก CSV', 'Export CSV'],
   ['ลบค่าเฉลี่ยช่วง static (zero offset)', 'Subtract static-period mean (zero offset)'], ['จำนวน frame', 'No. of frames'], ['Static: frame เริ่ม', 'Static: start frame'],
   ['ค่า width เป็น placeholder ต้องวัดจริง', 'width values are placeholders — measure real ones'], ['ยังไม่เทียบกับ Visual3D', 'not yet compared with Visual3D'],
@@ -2129,20 +2217,70 @@ function fillMsel() {
 }
 $('tabA').disabled = true;
 
+/* ---------- Subject Anthropometry */
+function getAnthro() {
+  const num = (id, def) => { const v = parseFloat($(id).value); return isNaN(v) ? def : v; };
+  const hCm = num('subH', 170.0);
+  const mKg = num('subM', 70.0);
+  const sex = $('subSex') ? $('subSex').value : 'M';
+  return E.estimateAnthropometry(hCm / 100, mKg, sex);
+}
+
+function updateAnthroUI(applyToModel = false) {
+  const at = getAnthro();
+  if ($('lblKneeW')) $('lblKneeW').textContent = at.kneeW.toFixed(3) + ' m';
+  if ($('lblAnkleW')) $('lblAnkleW').textContent = at.ankleW.toFixed(3) + ' m';
+  if ($('lblLegL')) $('lblLegL').textContent = at.lengths.thigh.toFixed(2) + ' / ' + at.lengths.shank.toFixed(2) + ' m';
+  if ($('lblLegM')) $('lblLegM').textContent = 'Thigh ' + at.masses.thigh + ' · Shank ' + at.masses.shank + ' kg';
+
+  if (applyToModel) {
+    if ($('aKR')) $('aKR').value = at.kneeW.toFixed(3);
+    if ($('aKL')) $('aKL').value = at.kneeW.toFixed(3);
+    if ($('aAR')) $('aAR').value = at.ankleW.toFixed(3);
+    if ($('aAL')) $('aAL').value = at.ankleW.toFixed(3);
+    if ($('subMR') && $('aMR')) $('aMR').value = $('subMR').value;
+    if ($('fMass')) $('fMass').value = at.massKg.toFixed(1);
+
+    const n = $('angNote');
+    if (n) {
+      n.className = 'note';
+      n.textContent = 'นำสัดส่วน Anthropometry (H: ' + (at.heightM * 100).toFixed(0) + ' cm, BW: ' + at.massKg.toFixed(1) + ' kg, ' + (at.sex === 'F' ? 'หญิง' : 'ชาย') + ') ไปปรับค่าโมเดลเรียบร้อย';
+    }
+
+    if (kin && ds) {
+      runAngles();
+    }
+  }
+}
+
 /* ---------- joint angles (V3D-style, computed in the browser) */
 function runAngles() {
   if (!ds) return;
   const num = id => parseFloat($(id).value);
-  const p = { staticStart: num('aS0') | 0, staticN: num('aSN') | 0, kneeW: { R: num('aKR'), L: num('aKL') }, ankleW: { R: num('aAR'), L: num('aAL') }, markerR: num('aMR'), normalize: $('aNorm').checked };
+  const anthro = getAnthro();
+  const p = {
+    staticStart: num('aS0') | 0,
+    staticN: num('aSN') | 0,
+    kneeW: { R: num('aKR'), L: num('aKL') },
+    ankleW: { R: num('aAR'), L: num('aAL') },
+    markerR: num('aMR'),
+    normalize: $('aNorm').checked,
+    anthro
+  };
   const r = E.computeLowerBody(ds, p), n = $('angNote');
   if (!r.ok) { kin = null; viewer.kin = null; $('tabA').disabled = true; $('tabA2').disabled = true; $('bCsv').disabled = true; n.className = 'note err'; n.textContent = r.error; viewer.invalidate(); return; }
   kin = r; viewer.kin = r; viewer.invalidate();
   $('tabA').disabled = false; $('tabA2').disabled = false; $('bCsv').disabled = false;
   const fmt = j => { const g = r.ranges[j].a; return j + ' ' + g[0].toFixed(0) + '…' + g[1].toFixed(0) + '°'; };
   n.className = 'note' + (r.warnings.length ? ' warn' : '');
-  n.textContent = 'static f' + r.staticRange[0] + '–' + r.staticRange[1] + ' (marker ขยับสูงสุด ' + (r.staticMove * 1000).toFixed(1) + ' mm) · flex: ' + ['RHip', 'RKnee', 'RAnkle', 'LHip', 'LKnee', 'LAnkle'].map(fmt).join(' · ') + (r.warnings.length ? ' · ⚠ ' + r.warnings.join(' · ') : '') + ' · ยังไม่เทียบกับ Visual3D';
+  n.textContent = 'static f' + r.staticRange[0] + '–' + r.staticRange[1] + ' (marker ขยับสูงสุด ' + (r.staticMove * 1000).toFixed(1) + ' mm) · flex: ' + ['RHip', 'RKnee', 'RAnkle', 'LHip', 'LKnee', 'LAnkle'].map(fmt).join(' · ') + (r.warnings.length ? ' · ⚠ ' + r.warnings.join(' · ') : '') + ' · สัดส่วนโมเดล: knee=' + num('aKR').toFixed(3) + 'm ankle=' + num('aAR').toFixed(3) + 'm';
   setTab('ang');
 }
+if ($('bApplyAnthro')) $('bApplyAnthro').addEventListener('click', () => updateAnthroUI(true));
+['subH', 'subM', 'subSex', 'subMR'].forEach(id => {
+  const el = $(id);
+  if (el) el.addEventListener('input', () => updateAnthroUI(false));
+});
 $('bAng').addEventListener('click', runAngles);
 $('bSide').addEventListener('click', () => { const on = document.querySelector('.app').classList.toggle('nosideb'); $('bSide').setAttribute('aria-pressed', on); $('bSide').textContent = on ? '◨ เมนู' : '◧ เมนู'; viewer.invalidate(); });
 $('oBody').addEventListener('input', e => { viewer.opt.body = e.target.checked; viewer.invalidate(); });
@@ -2302,12 +2440,19 @@ async function openFile(file) {
   } catch (err) { note('เปิดไฟล์ไม่ได้: ' + err.message, 'err'); }
 }
 $('file').addEventListener('change', e => { const f = e.target.files[0]; if (f) openFile(f); e.target.value = ''; });
-$('btnSample').addEventListener('click', () => load(E.makeSyntheticCMJ()));
+$('btnSample').addEventListener('click', () => {
+  if ($('subH')) $('subH').value = 175;
+  if ($('subM')) $('subM').value = 70;
+  if ($('subSex')) $('subSex').value = 'M';
+  updateAnthroUI(true);
+  load(E.makeSyntheticCMJ());
+});
 const vp = $('vp');
 ['dragenter', 'dragover'].forEach(t => vp.addEventListener(t, e => { e.preventDefault(); $('drop').hidden = false; }));
 ['dragleave', 'drop'].forEach(t => vp.addEventListener(t, e => { e.preventDefault(); $('drop').hidden = true; }));
 vp.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) openFile(f); });
 
+updateAnthroUI(true);
 load(E.makeSyntheticCMJ());
 $('bLang').addEventListener('click', () => setLang(LANG === 'en' ? 'th' : 'en'));
 window.langChanged = function () { try { updateChart(); if (typeof cmj !== 'undefined' && cmj && fa && fa.ok) drawCmj(fa); } catch (e) { /* charts not ready */ } viewer.invalidate(); };

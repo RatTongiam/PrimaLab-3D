@@ -4,7 +4,8 @@ try { const s = localStorage.getItem('primalab.lang'); if (s === 'en' || s === '
 const I18N_EXACT = {
   'วน': 'Loop', 'ปิด': 'Off', 'ทั้งหมด': 'All', 'ไม่เลือก': 'None', 'ขนาด': 'Size', 'ไฟล์': 'File', 'ชื่อ': 'Name', 'ความถี่': 'Rate', 'เฟรม': 'Frames',
   'รวม': 'Total', 'ซ้าย': 'Left', 'ขวา': 'Right', 'เล่น': 'Play', 'ไม่แสดง': 'None', 'เมนู': 'Menu', '◧ เมนู': '◧ Menu', '◨ เมนู': '◨ Menu', 'ไม่พบ': 'Not found',
-  'ความเร็ว': 'Speed', 'Fz รวม': 'Fz total', 'ความเร็ว COM': 'COM velocity', 'เลือก': 'Select'
+  'ความเร็ว': 'Speed', 'Fz รวม': 'Fz total', 'ความเร็ว COM': 'COM velocity', 'เลือก': 'Select',
+  'ส่วนสูง (cm)': 'Height (cm)', 'น้ำหนัก (kg)': 'Weight (kg)', 'เพศ': 'Sex', 'ชาย': 'Male', 'หญิง': 'Female', 'ชาย (M)': 'Male (M)', 'หญิง (F)': 'Female (F)'
 };
 const I18N_FRAG = [
   ['หน่วยเมตร', 'units: metres'], ['ข้อมูลสังเคราะห์', 'Synthetic data'], ['โหลดตัวอย่าง', 'Load sample'], ['เปิดไฟล์ C3D', 'Open C3D file'],
@@ -17,6 +18,11 @@ const I18N_FRAG = [
   ['คลิก marker สองตัวเพื่อเพิ่มหรือลบ link', 'Click two markers to add or remove a link'], ['กลับไปใช้ link อัตโนมัติจากชื่อ marker', 'Revert to automatic links from marker names'],
   ['โหมดแก้ไข link: คลิก marker สองตัวเพื่อเพิ่มหรือลบ link (Esc = ออก)', 'Link edit mode: click two markers to add or remove a link (Esc = exit)'],
   ['ควบคุมเวลา', 'Playback controls'], ['เฟรมก่อนหน้า', 'Previous frame'], ['เฟรมถัดไป', 'Next frame'], ['เล่น/หยุด', 'Play/Pause'], ['หยุดชั่วคราว', 'Pause'], ['ตำแหน่งเฟรม', 'Frame position'],
+  ['ผู้ทดสอบ & สัดส่วน (Anthropometry)', 'Subject & Anthropometry'], ['ผู้ทดสอบ & สัดส่วน', 'Subject & Anthropometry'],
+  ['ประมาณการและนำไปใช้', 'Estimate & Apply'], ['ส่วนสูง (cm)', 'Height (cm)'], ['น้ำหนัก (kg)', 'Weight (kg)'],
+  ['นำสัดส่วน Anthropometry', 'Applied anthropometry'], ['ไปปรับค่าโมเดลเรียบร้อย', 'to model successfully'],
+  ['ปรับค่า width จาก Anthropometry หรือกรอกค่าจริง', 'Adjust width from Anthropometry or enter measured values'],
+  ['สัดส่วนโมเดล: ', 'Model dimensions: '],
   ['มุมข้อต่อ (แบบ V3D)', 'Joint angles (V3D-style)'], ['คำนวณมุมข้อต่อ', 'Compute joint angles'], ['มุมข้อต่อ', 'Joint angles'], ['ส่งออก CSV', 'Export CSV'],
   ['ลบค่าเฉลี่ยช่วง static (zero offset)', 'Subtract static-period mean (zero offset)'], ['จำนวน frame', 'No. of frames'], ['Static: frame เริ่ม', 'Static: start frame'],
   ['ค่า width เป็น placeholder ต้องวัดจริง', 'width values are placeholders — measure real ones'], ['ยังไม่เทียบกับ Visual3D', 'not yet compared with Visual3D'],

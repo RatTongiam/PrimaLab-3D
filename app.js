@@ -208,20 +208,70 @@ function fillMsel() {
 }
 $('tabA').disabled = true;
 
+/* ---------- Subject Anthropometry */
+function getAnthro() {
+  const num = (id, def) => { const v = parseFloat($(id).value); return isNaN(v) ? def : v; };
+  const hCm = num('subH', 170.0);
+  const mKg = num('subM', 70.0);
+  const sex = $('subSex') ? $('subSex').value : 'M';
+  return E.estimateAnthropometry(hCm / 100, mKg, sex);
+}
+
+function updateAnthroUI(applyToModel = false) {
+  const at = getAnthro();
+  if ($('lblKneeW')) $('lblKneeW').textContent = at.kneeW.toFixed(3) + ' m';
+  if ($('lblAnkleW')) $('lblAnkleW').textContent = at.ankleW.toFixed(3) + ' m';
+  if ($('lblLegL')) $('lblLegL').textContent = at.lengths.thigh.toFixed(2) + ' / ' + at.lengths.shank.toFixed(2) + ' m';
+  if ($('lblLegM')) $('lblLegM').textContent = 'Thigh ' + at.masses.thigh + ' · Shank ' + at.masses.shank + ' kg';
+
+  if (applyToModel) {
+    if ($('aKR')) $('aKR').value = at.kneeW.toFixed(3);
+    if ($('aKL')) $('aKL').value = at.kneeW.toFixed(3);
+    if ($('aAR')) $('aAR').value = at.ankleW.toFixed(3);
+    if ($('aAL')) $('aAL').value = at.ankleW.toFixed(3);
+    if ($('subMR') && $('aMR')) $('aMR').value = $('subMR').value;
+    if ($('fMass')) $('fMass').value = at.massKg.toFixed(1);
+
+    const n = $('angNote');
+    if (n) {
+      n.className = 'note';
+      n.textContent = 'นำสัดส่วน Anthropometry (H: ' + (at.heightM * 100).toFixed(0) + ' cm, BW: ' + at.massKg.toFixed(1) + ' kg, ' + (at.sex === 'F' ? 'หญิง' : 'ชาย') + ') ไปปรับค่าโมเดลเรียบร้อย';
+    }
+
+    if (kin && ds) {
+      runAngles();
+    }
+  }
+}
+
 /* ---------- joint angles (V3D-style, computed in the browser) */
 function runAngles() {
   if (!ds) return;
   const num = id => parseFloat($(id).value);
-  const p = { staticStart: num('aS0') | 0, staticN: num('aSN') | 0, kneeW: { R: num('aKR'), L: num('aKL') }, ankleW: { R: num('aAR'), L: num('aAL') }, markerR: num('aMR'), normalize: $('aNorm').checked };
+  const anthro = getAnthro();
+  const p = {
+    staticStart: num('aS0') | 0,
+    staticN: num('aSN') | 0,
+    kneeW: { R: num('aKR'), L: num('aKL') },
+    ankleW: { R: num('aAR'), L: num('aAL') },
+    markerR: num('aMR'),
+    normalize: $('aNorm').checked,
+    anthro
+  };
   const r = E.computeLowerBody(ds, p), n = $('angNote');
   if (!r.ok) { kin = null; viewer.kin = null; $('tabA').disabled = true; $('tabA2').disabled = true; $('bCsv').disabled = true; n.className = 'note err'; n.textContent = r.error; viewer.invalidate(); return; }
   kin = r; viewer.kin = r; viewer.invalidate();
   $('tabA').disabled = false; $('tabA2').disabled = false; $('bCsv').disabled = false;
   const fmt = j => { const g = r.ranges[j].a; return j + ' ' + g[0].toFixed(0) + '…' + g[1].toFixed(0) + '°'; };
   n.className = 'note' + (r.warnings.length ? ' warn' : '');
-  n.textContent = 'static f' + r.staticRange[0] + '–' + r.staticRange[1] + ' (marker ขยับสูงสุด ' + (r.staticMove * 1000).toFixed(1) + ' mm) · flex: ' + ['RHip', 'RKnee', 'RAnkle', 'LHip', 'LKnee', 'LAnkle'].map(fmt).join(' · ') + (r.warnings.length ? ' · ⚠ ' + r.warnings.join(' · ') : '') + ' · ยังไม่เทียบกับ Visual3D';
+  n.textContent = 'static f' + r.staticRange[0] + '–' + r.staticRange[1] + ' (marker ขยับสูงสุด ' + (r.staticMove * 1000).toFixed(1) + ' mm) · flex: ' + ['RHip', 'RKnee', 'RAnkle', 'LHip', 'LKnee', 'LAnkle'].map(fmt).join(' · ') + (r.warnings.length ? ' · ⚠ ' + r.warnings.join(' · ') : '') + ' · สัดส่วนโมเดล: knee=' + num('aKR').toFixed(3) + 'm ankle=' + num('aAR').toFixed(3) + 'm';
   setTab('ang');
 }
+if ($('bApplyAnthro')) $('bApplyAnthro').addEventListener('click', () => updateAnthroUI(true));
+['subH', 'subM', 'subSex', 'subMR'].forEach(id => {
+  const el = $(id);
+  if (el) el.addEventListener('input', () => updateAnthroUI(false));
+});
 $('bAng').addEventListener('click', runAngles);
 $('bSide').addEventListener('click', () => { const on = document.querySelector('.app').classList.toggle('nosideb'); $('bSide').setAttribute('aria-pressed', on); $('bSide').textContent = on ? '◨ เมนู' : '◧ เมนู'; viewer.invalidate(); });
 $('oBody').addEventListener('input', e => { viewer.opt.body = e.target.checked; viewer.invalidate(); });
@@ -381,12 +431,19 @@ async function openFile(file) {
   } catch (err) { note('เปิดไฟล์ไม่ได้: ' + err.message, 'err'); }
 }
 $('file').addEventListener('change', e => { const f = e.target.files[0]; if (f) openFile(f); e.target.value = ''; });
-$('btnSample').addEventListener('click', () => load(E.makeSyntheticCMJ()));
+$('btnSample').addEventListener('click', () => {
+  if ($('subH')) $('subH').value = 175;
+  if ($('subM')) $('subM').value = 70;
+  if ($('subSex')) $('subSex').value = 'M';
+  updateAnthroUI(true);
+  load(E.makeSyntheticCMJ());
+});
 const vp = $('vp');
 ['dragenter', 'dragover'].forEach(t => vp.addEventListener(t, e => { e.preventDefault(); $('drop').hidden = false; }));
 ['dragleave', 'drop'].forEach(t => vp.addEventListener(t, e => { e.preventDefault(); $('drop').hidden = true; }));
 vp.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) openFile(f); });
 
+updateAnthroUI(true);
 load(E.makeSyntheticCMJ());
 $('bLang').addEventListener('click', () => setLang(LANG === 'en' ? 'th' : 'en'));
 window.langChanged = function () { try { updateChart(); if (typeof cmj !== 'undefined' && cmj && fa && fa.ok) drawCmj(fa); } catch (e) { /* charts not ready */ } viewer.invalidate(); };

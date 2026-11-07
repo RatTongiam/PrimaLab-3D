@@ -990,6 +990,56 @@ const LB_MARKERS = ['LASI', 'RASI', 'LPSI', 'RPSI', 'LKNE', 'RKNE', 'LTHI', 'RTH
 const LB_DEFAULTS = { kneeW: 0.10, ankleW: 0.07, markerR: 0.007, staticStart: 0, staticN: 10, normalize: false };
 const LB_JOINTS = [['RHip', 'RTH', 'RPV'], ['RKnee', 'RSK', 'RTH'], ['RAnkle', 'RFT', 'RSK'], ['LHip', 'LTH', 'RPV'], ['LKnee', 'LSK', 'LTH'], ['LAnkle', 'LFT', 'LSK']];
 
+/* ---------------------------------------------------------------- Anthropometry estimation
+   Based on regression equations from Winter (2009), Drillis & Contini (1966), and De Leva (1996):
+   - Knee width (bicondylar diameter): Male ~0.058*H, Female ~0.055*H
+   - Ankle width (bimalleolar diameter): Male ~0.041*H, Female ~0.038*H
+   - Nominal ASIS distance: Male ~0.136*H, Female ~0.148*H
+   - Segment lengths (Thigh 0.245*H, Shank 0.246*H, Foot 0.152*H)
+   - Segment masses (De Leva 1996 percentages of total body mass)
+----------------------------------------------------------------------------------------- */
+function estimateAnthropometry(heightM, massKg, sex) {
+  const isF = String(sex || 'M').toUpperCase().startsWith('F');
+  const H = Math.max(0.5, Math.min(2.5, +(heightM || 1.70)));
+  const M = Math.max(20, Math.min(300, +(massKg || 70)));
+
+  const kneeW = isF ? 0.055 * H : 0.058 * H;
+  const ankleW = isF ? 0.038 * H : 0.041 * H;
+  const asisDist = isF ? 0.148 * H : 0.136 * H;
+
+  const thighL = 0.245 * H;
+  const shankL = 0.246 * H;
+  const footL = 0.152 * H;
+
+  // De Leva (1996) segment mass ratios
+  const thighMass = M * (isF ? 0.1478 : 0.1416);
+  const shankMass = M * (isF ? 0.0481 : 0.0433);
+  const footMass = M * (isF ? 0.0129 : 0.0137);
+  const pelvisMass = M * (isF ? 0.1247 : 0.1117);
+  const trunkMass = M * (isF ? 0.4257 : 0.4346);
+
+  return {
+    heightM: H,
+    massKg: M,
+    sex: isF ? 'F' : 'M',
+    kneeW: +kneeW.toFixed(4),
+    ankleW: +ankleW.toFixed(4),
+    asisDist: +asisDist.toFixed(4),
+    lengths: {
+      thigh: +thighL.toFixed(4),
+      shank: +shankL.toFixed(4),
+      foot: +footL.toFixed(4)
+    },
+    masses: {
+      thigh: +thighMass.toFixed(2),
+      shank: +shankMass.toFixed(2),
+      foot: +footMass.toFixed(2),
+      pelvis: +pelvisMass.toFixed(2),
+      trunk: +trunkMass.toFixed(2)
+    }
+  };
+}
+
 function computeLowerBody(ds, params) {
   const p = Object.assign({}, LB_DEFAULTS, params || {});
   const kw = s => (p.kneeW && typeof p.kneeW === 'object') ? p.kneeW[s] : p.kneeW, aw = s => (p.ankleW && typeof p.ankleW === 'object') ? p.ankleW[s] : p.ankleW;
@@ -1096,7 +1146,7 @@ function computeLowerBody(ds, params) {
   for (const jn in gimbal) if (gimbal[jn] > 75) warnings.push(jn + ': มุมแกนกลาง (ab/adduction) สูงสุด ' + gimbal[jn].toFixed(0) + '° ใกล้ gimbal lock ค่ามุมสามแกนอาจไม่น่าเชื่อถือ');
   const ranges = {};
   for (const jn in out.angles) { ranges[jn] = {}; for (const c of ['a', 'b', 'g']) { let lo = Infinity, hi = -Infinity; for (let f = 0; f < nF; f++) { const v = out.angles[jn][c][f]; if (v === v) { if (v < lo) lo = v; if (v > hi) hi = v; } } ranges[jn][c] = [lo, hi]; } }
-  return { ok: true, params: p, warnings, angles: out.angles, frames: out.frames, jc: out.jc, ranges, upTilt, staticMove: maxMove, landmarks: L, staticRange: [s0, s1 - 1], asisDistance: D, segNames };
+  return { ok: true, params: p, anthro: p.anthro || null, warnings, angles: out.angles, frames: out.frames, jc: out.jc, ranges, upTilt, staticMove: maxMove, landmarks: L, staticRange: [s0, s1 - 1], asisDistance: D, segNames };
 }
 
 /* ---------------------------------------------------------------- Force-analysis engine
@@ -1444,6 +1494,6 @@ const FA = (() => {
   return { butter, filtfilt, butterLowpass, findQuietWindow, detectPhases, calcMetrics, landingImpact, impactRows, analyzePlates, G };
 })();
 
-const api = { FA, computeLowerBody, rigidFit, cardanZXY, rotZXY, LB_JOINTS, LB_DEFAULTS, readC3D, makeSyntheticCMJ, defaultLinks, splitLabel, sideOf, validRatio, MocapViewer, ChartView, AXIS, SIDE_COLOR, finishDataset };
+const api = { FA, computeLowerBody, estimateAnthropometry, rigidFit, cardanZXY, rotZXY, LB_JOINTS, LB_DEFAULTS, readC3D, makeSyntheticCMJ, defaultLinks, splitLabel, sideOf, validRatio, MocapViewer, ChartView, AXIS, SIDE_COLOR, finishDataset };
 if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.MocapEngine = api;
 })(typeof window !== 'undefined' ? window : globalThis);

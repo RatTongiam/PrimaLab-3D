@@ -146,10 +146,17 @@ kbd { font: 500 11px var(--mono); padding: 1px 5px; border: 1px solid var(--line
   .viewport { height: clamp(300px, 52vh, 520px); }
   .mlist { max-height: 300px; }
 }
-.angform{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;margin-bottom:10px;font-size:12px}
+.angform{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;margin-bottom:10px;font-size:12px;padding:10px 12px 0}
 .angform label{display:flex;flex-direction:column;gap:2px;color:var(--fg-2)}
 .angform label.wide{grid-column:1/-1;flex-direction:row;align-items:center;gap:6px}
-.angform input[type=number]{width:100%;min-width:0;font:inherit;padding:4px 6px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--fg)}
+.angform input[type=number],.angform select{width:100%;min-width:0;font:inherit;padding:4px 6px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--fg)}
+.card-acts{display:flex;flex-wrap:wrap;gap:6px;padding:0 12px 10px}
+.card-acts .btn{flex:1 1 auto}
+.anthro-summary{margin:0 12px 10px;padding:8px 10px;border-radius:4px;border:1px solid var(--line);background:var(--bg);font-size:11.5px;line-height:1.5;color:var(--fg-2)}
+.anthro-row{display:flex;justify-content:space-between;gap:8px;margin-bottom:2px}
+.anthro-row:last-child{margin-bottom:0}
+.anthro-row strong{color:var(--fg);font-family:var(--mono)}
+.anthro-row span:last-child{font-family:var(--mono)}
 #jsel{font:inherit;font-size:12px;margin-left:6px}
 .fapanel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 12px; }
 .fahead { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; margin-bottom: 10px; }
@@ -325,21 +332,46 @@ kbd { font: 500 11px var(--mono); padding: 1px 5px; border: 1px solid var(--line
         <dl class="info" id="info"></dl>
         <p class="note" id="note" hidden></p>
       </section>
+      <section class="card" aria-labelledby="hSubj">
+        <h2 id="hSubj">ผู้ทดสอบ & สัดส่วน (Anthropometry)</h2>
+        <div class="angform">
+          <label>ส่วนสูง (cm) <input id="subH" type="number" min="50" max="250" step="0.5" value="170.0" placeholder="170"></label>
+          <label>น้ำหนัก (kg) <input id="subM" type="number" min="20" max="250" step="0.5" value="70.0" placeholder="70"></label>
+          <label>เพศ
+            <select id="subSex">
+              <option value="M" selected>ชาย (M)</option>
+              <option value="F">หญิง (F)</option>
+            </select>
+          </label>
+          <label>Marker R (m) <input id="subMR" type="number" step="0.001" value="0.007"></label>
+        </div>
+        <div class="card-acts">
+          <button id="bApplyAnthro" class="btn primary sm" type="button">ประมาณการและนำไปใช้</button>
+        </div>
+        <div id="anthroSummary" class="anthro-summary">
+          <div class="anthro-row"><span>Knee width (est.):</span><strong id="lblKneeW">0.099 m</strong></div>
+          <div class="anthro-row"><span>Ankle width (est.):</span><strong id="lblAnkleW">0.070 m</strong></div>
+          <div class="anthro-row"><span>Thigh / Shank:</span><span id="lblLegL">0.42 / 0.42 m</span></div>
+          <div class="anthro-row"><span>Segment mass:</span><span id="lblLegM">Thigh 9.9 · Shank 3.0 kg</span></div>
+        </div>
+      </section>
       <section class="card" aria-labelledby="hAng">
         <h2 id="hAng">มุมข้อต่อ (แบบ V3D)</h2>
         <div class="angform">
           <label>Static: frame เริ่ม <input id="aS0" type="number" min="0" value="0"></label>
           <label>จำนวน frame <input id="aSN" type="number" min="1" value="10"></label>
-          <label>Knee width R (m) <input id="aKR" type="number" step="0.001" value="0.100"></label>
-          <label>Knee width L (m) <input id="aKL" type="number" step="0.001" value="0.100"></label>
+          <label>Knee width R (m) <input id="aKR" type="number" step="0.001" value="0.099"></label>
+          <label>Knee width L (m) <input id="aKL" type="number" step="0.001" value="0.099"></label>
           <label>Ankle width R (m) <input id="aAR" type="number" step="0.001" value="0.070"></label>
           <label>Ankle width L (m) <input id="aAL" type="number" step="0.001" value="0.070"></label>
           <label>Marker radius (m) <input id="aMR" type="number" step="0.001" value="0.007"></label>
           <label class="wide"><input id="aNorm" type="checkbox"> ลบค่าเฉลี่ยช่วง static (zero offset)</label>
         </div>
-        <button id="bAng" class="btn primary" type="button">คำนวณมุมข้อต่อ</button>
-        <button id="bCsv" class="btn" type="button" disabled>ส่งออก CSV</button>
-        <p class="note" id="angNote">Cardan Z-X-Y · X=flex/ext, Y=ab/adduction, Z=axial · ค่า width เป็น placeholder ต้องวัดจริง · ยังไม่เทียบกับ Visual3D</p>
+        <div class="card-acts">
+          <button id="bAng" class="btn primary" type="button">คำนวณมุมข้อต่อ</button>
+          <button id="bCsv" class="btn" type="button" disabled>ส่งออก CSV</button>
+        </div>
+        <p class="note" id="angNote">Cardan Z-X-Y · X=flex/ext, Y=ab/adduction, Z=axial · ปรับค่า width จาก Anthropometry หรือกรอกค่าจริง</p>
       </section>
       <section class="card" aria-labelledby="hMk">
         <h2 id="hMk">Marker</h2>
