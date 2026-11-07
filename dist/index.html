@@ -343,13 +343,12 @@ kbd { font: 500 11px var(--mono); padding: 1px 5px; border: 1px solid var(--line
         <div class="angform">
           <label>ส่วนสูง (cm) <input id="subH" type="number" min="50" max="250" step="0.5" value="170.0" placeholder="170"></label>
           <label>น้ำหนัก (kg) <input id="subM" type="number" min="20" max="250" step="0.5" value="70.0" placeholder="70"></label>
-          <label>เพศ
+          <label class="wide">เพศ
             <select id="subSex">
               <option value="M" selected>ชาย (M)</option>
               <option value="F">หญิง (F)</option>
             </select>
           </label>
-          <label>Marker R (m) <input id="subMR" type="number" step="0.001" value="0.007"></label>
         </div>
         <div class="card-acts">
           <button id="bApplyAnthro" class="btn primary sm" type="button">ประมาณการและนำไปใช้</button>
@@ -360,14 +359,15 @@ kbd { font: 500 11px var(--mono); padding: 1px 5px; border: 1px solid var(--line
           <div class="anthro-row"><span>Thigh / Shank:</span><span id="lblLegL">0.42 / 0.42 m</span></div>
           <div class="anthro-row"><span>Segment mass:</span><span id="lblLegM">Thigh 9.9 · Shank 3.0 kg</span></div>
         </div>
+        <p class="note warn" id="subNote">* ค่า width เป็นเพียงค่าประมาณการเบื้องต้น แนะนำให้ใช้คาลิปเปอร์วัดจริง</p>
       </section>
       <section class="card" aria-labelledby="hAng">
         <h2 id="hAng">มุมข้อต่อ (แบบ V3D)</h2>
         <div class="angform">
           <label>Static: frame เริ่ม <input id="aS0" type="number" min="0" value="0"></label>
           <label>จำนวน frame <input id="aSN" type="number" min="1" value="10"></label>
-          <label>Knee width R (m) <input id="aKR" type="number" step="0.001" value="0.099"></label>
-          <label>Knee width L (m) <input id="aKL" type="number" step="0.001" value="0.099"></label>
+          <label>Knee width R (m) <input id="aKR" type="number" step="0.001" value="0.100"></label>
+          <label>Knee width L (m) <input id="aKL" type="number" step="0.001" value="0.100"></label>
           <label>Ankle width R (m) <input id="aAR" type="number" step="0.001" value="0.070"></label>
           <label>Ankle width L (m) <input id="aAL" type="number" step="0.001" value="0.070"></label>
           <label>Marker radius (m) <input id="aMR" type="number" step="0.001" value="0.007"></label>
@@ -377,7 +377,7 @@ kbd { font: 500 11px var(--mono); padding: 1px 5px; border: 1px solid var(--line
           <button id="bAng" class="btn primary" type="button">คำนวณมุมข้อต่อ</button>
           <button id="bCsv" class="btn" type="button" disabled>ส่งออก CSV</button>
         </div>
-        <p class="note" id="angNote">Cardan Z-X-Y · X=flex/ext, Y=ab/adduction, Z=axial · ปรับค่า width จาก Anthropometry หรือกรอกค่าจริง</p>
+        <p class="note" id="angNote">Cardan Z-X-Y · X=flex/ext, Y=ab/adduction, Z=axial · ค่า width เป็น placeholder ต้องวัดจริง · ยังไม่เทียบกับ Visual3D</p>
       </section>
       <section class="card" aria-labelledby="hMk">
         <h2 id="hMk">Marker</h2>
@@ -1390,27 +1390,31 @@ const LB_DEFAULTS = { kneeW: 0.10, ankleW: 0.07, markerR: 0.007, staticStart: 0,
 const LB_JOINTS = [['RHip', 'RTH', 'RPV'], ['RKnee', 'RSK', 'RTH'], ['RAnkle', 'RFT', 'RSK'], ['LHip', 'LTH', 'RPV'], ['LKnee', 'LSK', 'LTH'], ['LAnkle', 'LFT', 'LSK']];
 
 /* ---------------------------------------------------------------- Anthropometry estimation
-   Based on regression equations from Winter (2009), Drillis & Contini (1966), and De Leva (1996):
-   - Knee width (bicondylar diameter): Male ~0.058*H, Female ~0.055*H
-   - Ankle width (bimalleolar diameter): Male ~0.041*H, Female ~0.038*H
-   - Nominal ASIS distance: Male ~0.136*H, Female ~0.148*H
-   - Segment lengths (Thigh 0.245*H, Shank 0.246*H, Foot 0.152*H)
-   - Segment masses (De Leva 1996 percentages of total body mass)
+   - Segment lengths: Winter (2009) / Drillis & Contini (1966) (Thigh 0.245*H, Shank 0.246*H, Foot 0.152*H)
+   - Segment masses: De Leva (1996) percentages of total body mass
+   - Knee/ankle widths: Rough empirical / clinical heuristics (~0.058*H male / ~0.055*H female,
+     ~0.041*H male / ~0.038*H female). These are NOT published regressions from Winter or De Leva;
+     they serve solely as rough initial placeholders when caliper measurements are unavailable.
+     Direct measurement (calipers) is strongly recommended for accurate kinematics.
 ----------------------------------------------------------------------------------------- */
 function estimateAnthropometry(heightM, massKg, sex) {
+  const H = parseFloat(heightM);
+  if (!isFinite(H) || H < 0.5 || H > 2.5) return null;
+  const rawM = parseFloat(massKg);
+  const M = isFinite(rawM) && rawM >= 10 && rawM <= 350 ? rawM : 70;
   const isF = String(sex || 'M').toUpperCase().startsWith('F');
-  const H = Math.max(0.5, Math.min(2.5, +(heightM || 1.70)));
-  const M = Math.max(20, Math.min(300, +(massKg || 70)));
 
+  // Rough empirical heuristics (direct measurement recommended)
   const kneeW = isF ? 0.055 * H : 0.058 * H;
   const ankleW = isF ? 0.038 * H : 0.041 * H;
   const asisDist = isF ? 0.148 * H : 0.136 * H;
 
+  // Published segment lengths (Winter 2009 / Drillis & Contini 1966)
   const thighL = 0.245 * H;
   const shankL = 0.246 * H;
   const footL = 0.152 * H;
 
-  // De Leva (1996) segment mass ratios
+  // Published segment mass ratios (De Leva 1996)
   const thighMass = M * (isF ? 0.1478 : 0.1416);
   const shankMass = M * (isF ? 0.0481 : 0.0433);
   const footMass = M * (isF ? 0.0129 : 0.0137);
@@ -1424,6 +1428,7 @@ function estimateAnthropometry(heightM, massKg, sex) {
     kneeW: +kneeW.toFixed(4),
     ankleW: +ankleW.toFixed(4),
     asisDist: +asisDist.toFixed(4),
+    isRoughEstimate: true,
     lengths: {
       thigh: +thighL.toFixed(4),
       shank: +shankL.toFixed(4),
@@ -1921,9 +1926,7 @@ const I18N_FRAG = [
   ['ควบคุมเวลา', 'Playback controls'], ['เฟรมก่อนหน้า', 'Previous frame'], ['เฟรมถัดไป', 'Next frame'], ['เล่น/หยุด', 'Play/Pause'], ['หยุดชั่วคราว', 'Pause'], ['ตำแหน่งเฟรม', 'Frame position'],
   ['ผู้ทดสอบ & สัดส่วน (Anthropometry)', 'Subject & Anthropometry'], ['ผู้ทดสอบ & สัดส่วน', 'Subject & Anthropometry'],
   ['ประมาณการและนำไปใช้', 'Estimate & Apply'], ['ส่วนสูง (cm)', 'Height (cm)'], ['น้ำหนัก (kg)', 'Weight (kg)'],
-  ['นำสัดส่วน Anthropometry', 'Applied anthropometry'], ['ไปปรับค่าโมเดลเรียบร้อย', 'to model successfully'],
-  ['ปรับค่า width จาก Anthropometry หรือกรอกค่าจริง', 'Adjust width from Anthropometry or enter measured values'],
-  ['สัดส่วนโมเดล: ', 'Model dimensions: '],
+  ['* ค่า width เป็นเพียงค่าประมาณการเบื้องต้น แนะนำให้ใช้คาลิปเปอร์วัดจริง', '* Knee/ankle widths are rough initial estimates. Direct measurement is strongly recommended.'],
   ['มุมข้อต่อ (แบบ V3D)', 'Joint angles (V3D-style)'], ['คำนวณมุมข้อต่อ', 'Compute joint angles'], ['มุมข้อต่อ', 'Joint angles'], ['ส่งออก CSV', 'Export CSV'],
   ['ลบค่าเฉลี่ยช่วง static (zero offset)', 'Subtract static-period mean (zero offset)'], ['จำนวน frame', 'No. of frames'], ['Static: frame เริ่ม', 'Static: start frame'],
   ['ค่า width เป็น placeholder ต้องวัดจริง', 'width values are placeholders — measure real ones'], ['ยังไม่เทียบกับ Visual3D', 'not yet compared with Visual3D'],
@@ -2219,15 +2222,35 @@ $('tabA').disabled = true;
 
 /* ---------- Subject Anthropometry */
 function getAnthro() {
-  const num = (id, def) => { const v = parseFloat($(id).value); return isNaN(v) ? def : v; };
-  const hCm = num('subH', 170.0);
-  const mKg = num('subM', 70.0);
+  const hRaw = $('subH') ? $('subH').value.trim() : '';
+  const mRaw = $('subM') ? $('subM').value.trim() : '';
+  if (!hRaw) return null;
+  const hCm = parseFloat(hRaw);
+  if (!isFinite(hCm) || hCm < 50 || hCm > 250) return null;
+  const mKg = mRaw ? parseFloat(mRaw) : 70.0;
   const sex = $('subSex') ? $('subSex').value : 'M';
   return E.estimateAnthropometry(hCm / 100, mKg, sex);
 }
 
 function updateAnthroUI(applyToModel = false) {
   const at = getAnthro();
+  const isEn = typeof LANG !== 'undefined' && LANG === 'en';
+  const subNote = $('subNote');
+
+  if (!at) {
+    if ($('lblKneeW')) $('lblKneeW').textContent = '—';
+    if ($('lblAnkleW')) $('lblAnkleW').textContent = '—';
+    if ($('lblLegL')) $('lblLegL').textContent = '—';
+    if ($('lblLegM')) $('lblLegM').textContent = '—';
+    if (applyToModel && subNote) {
+      subNote.className = 'note err';
+      subNote.textContent = isEn
+        ? 'Please enter a valid height (50–250 cm) before applying.'
+        : 'กรุณากรอกส่วนสูงที่ถูกต้อง (50–250 cm) ก่อนนำไปใช้';
+    }
+    return;
+  }
+
   if ($('lblKneeW')) $('lblKneeW').textContent = at.kneeW.toFixed(3) + ' m';
   if ($('lblAnkleW')) $('lblAnkleW').textContent = at.ankleW.toFixed(3) + ' m';
   if ($('lblLegL')) $('lblLegL').textContent = at.lengths.thigh.toFixed(2) + ' / ' + at.lengths.shank.toFixed(2) + ' m';
@@ -2238,18 +2261,24 @@ function updateAnthroUI(applyToModel = false) {
     if ($('aKL')) $('aKL').value = at.kneeW.toFixed(3);
     if ($('aAR')) $('aAR').value = at.ankleW.toFixed(3);
     if ($('aAL')) $('aAL').value = at.ankleW.toFixed(3);
-    if ($('subMR') && $('aMR')) $('aMR').value = $('subMR').value;
     if ($('fMass')) $('fMass').value = at.massKg.toFixed(1);
 
-    const n = $('angNote');
-    if (n) {
-      n.className = 'note';
-      n.textContent = 'นำสัดส่วน Anthropometry (H: ' + (at.heightM * 100).toFixed(0) + ' cm, BW: ' + at.massKg.toFixed(1) + ' kg, ' + (at.sex === 'F' ? 'หญิง' : 'ชาย') + ') ไปปรับค่าโมเดลเรียบร้อย';
+    if (subNote) {
+      subNote.className = 'note';
+      const sexLabel = at.sex === 'F' ? (isEn ? 'Female' : 'หญิง') : (isEn ? 'Male' : 'ชาย');
+      subNote.textContent = isEn
+        ? 'Applied estimates (H: ' + (at.heightM * 100).toFixed(0) + ' cm, BW: ' + at.massKg.toFixed(1) + ' kg, ' + sexLabel + ') to model inputs. *Direct measurement recommended.'
+        : 'นำค่าประมาณการ (ส่วนสูง: ' + (at.heightM * 100).toFixed(0) + ' cm, น้ำหนัก: ' + at.massKg.toFixed(1) + ' kg, ' + sexLabel + ') ไปใส่ในช่องโมเดลแล้ว *แนะนำให้วัดจริง';
     }
 
     if (kin && ds) {
       runAngles();
     }
+  } else if (subNote && subNote.classList.contains('err')) {
+    subNote.className = 'note warn';
+    subNote.textContent = isEn
+      ? '* Knee/ankle widths are rough initial estimates. Direct measurement is strongly recommended.'
+      : '* ค่า width เป็นเพียงค่าประมาณการเบื้องต้น แนะนำให้ใช้คาลิปเปอร์วัดจริง';
   }
 }
 
@@ -2273,11 +2302,11 @@ function runAngles() {
   $('tabA').disabled = false; $('tabA2').disabled = false; $('bCsv').disabled = false;
   const fmt = j => { const g = r.ranges[j].a; return j + ' ' + g[0].toFixed(0) + '…' + g[1].toFixed(0) + '°'; };
   n.className = 'note' + (r.warnings.length ? ' warn' : '');
-  n.textContent = 'static f' + r.staticRange[0] + '–' + r.staticRange[1] + ' (marker ขยับสูงสุด ' + (r.staticMove * 1000).toFixed(1) + ' mm) · flex: ' + ['RHip', 'RKnee', 'RAnkle', 'LHip', 'LKnee', 'LAnkle'].map(fmt).join(' · ') + (r.warnings.length ? ' · ⚠ ' + r.warnings.join(' · ') : '') + ' · สัดส่วนโมเดล: knee=' + num('aKR').toFixed(3) + 'm ankle=' + num('aAR').toFixed(3) + 'm';
+  n.textContent = 'static f' + r.staticRange[0] + '–' + r.staticRange[1] + ' (marker ขยับสูงสุด ' + (r.staticMove * 1000).toFixed(1) + ' mm) · flex: ' + ['RHip', 'RKnee', 'RAnkle', 'LHip', 'LKnee', 'LAnkle'].map(fmt).join(' · ') + (r.warnings.length ? ' · ⚠ ' + r.warnings.join(' · ') : '') + ' · ยังไม่เทียบกับ Visual3D';
   setTab('ang');
 }
 if ($('bApplyAnthro')) $('bApplyAnthro').addEventListener('click', () => updateAnthroUI(true));
-['subH', 'subM', 'subSex', 'subMR'].forEach(id => {
+['subH', 'subM', 'subSex'].forEach(id => {
   const el = $(id);
   if (el) el.addEventListener('input', () => updateAnthroUI(false));
 });
@@ -2440,22 +2469,23 @@ async function openFile(file) {
   } catch (err) { note('เปิดไฟล์ไม่ได้: ' + err.message, 'err'); }
 }
 $('file').addEventListener('change', e => { const f = e.target.files[0]; if (f) openFile(f); e.target.value = ''; });
-$('btnSample').addEventListener('click', () => {
-  if ($('subH')) $('subH').value = 175;
-  if ($('subM')) $('subM').value = 70;
-  if ($('subSex')) $('subSex').value = 'M';
-  updateAnthroUI(true);
-  load(E.makeSyntheticCMJ());
-});
+$('btnSample').addEventListener('click', () => load(E.makeSyntheticCMJ()));
 const vp = $('vp');
 ['dragenter', 'dragover'].forEach(t => vp.addEventListener(t, e => { e.preventDefault(); $('drop').hidden = false; }));
 ['dragleave', 'drop'].forEach(t => vp.addEventListener(t, e => { e.preventDefault(); $('drop').hidden = true; }));
 vp.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) openFile(f); });
 
-updateAnthroUI(true);
+updateAnthroUI(false);
 load(E.makeSyntheticCMJ());
 $('bLang').addEventListener('click', () => setLang(LANG === 'en' ? 'th' : 'en'));
-window.langChanged = function () { try { updateChart(); if (typeof cmj !== 'undefined' && cmj && fa && fa.ok) drawCmj(fa); } catch (e) { /* charts not ready */ } viewer.invalidate(); };
+window.langChanged = function () {
+  try {
+    updateChart();
+    if (typeof cmj !== 'undefined' && cmj && fa && fa.ok) drawCmj(fa);
+    updateAnthroUI(false);
+  } catch (e) { /* charts not ready */ }
+  viewer.invalidate();
+};
 if (LANG === 'en') setLang('en'); else setLang('th');
 })();
 

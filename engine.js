@@ -991,27 +991,31 @@ const LB_DEFAULTS = { kneeW: 0.10, ankleW: 0.07, markerR: 0.007, staticStart: 0,
 const LB_JOINTS = [['RHip', 'RTH', 'RPV'], ['RKnee', 'RSK', 'RTH'], ['RAnkle', 'RFT', 'RSK'], ['LHip', 'LTH', 'RPV'], ['LKnee', 'LSK', 'LTH'], ['LAnkle', 'LFT', 'LSK']];
 
 /* ---------------------------------------------------------------- Anthropometry estimation
-   Based on regression equations from Winter (2009), Drillis & Contini (1966), and De Leva (1996):
-   - Knee width (bicondylar diameter): Male ~0.058*H, Female ~0.055*H
-   - Ankle width (bimalleolar diameter): Male ~0.041*H, Female ~0.038*H
-   - Nominal ASIS distance: Male ~0.136*H, Female ~0.148*H
-   - Segment lengths (Thigh 0.245*H, Shank 0.246*H, Foot 0.152*H)
-   - Segment masses (De Leva 1996 percentages of total body mass)
+   - Segment lengths: Winter (2009) / Drillis & Contini (1966) (Thigh 0.245*H, Shank 0.246*H, Foot 0.152*H)
+   - Segment masses: De Leva (1996) percentages of total body mass
+   - Knee/ankle widths: Rough empirical / clinical heuristics (~0.058*H male / ~0.055*H female,
+     ~0.041*H male / ~0.038*H female). These are NOT published regressions from Winter or De Leva;
+     they serve solely as rough initial placeholders when caliper measurements are unavailable.
+     Direct measurement (calipers) is strongly recommended for accurate kinematics.
 ----------------------------------------------------------------------------------------- */
 function estimateAnthropometry(heightM, massKg, sex) {
+  const H = parseFloat(heightM);
+  if (!isFinite(H) || H < 0.5 || H > 2.5) return null;
+  const rawM = parseFloat(massKg);
+  const M = isFinite(rawM) && rawM >= 10 && rawM <= 350 ? rawM : 70;
   const isF = String(sex || 'M').toUpperCase().startsWith('F');
-  const H = Math.max(0.5, Math.min(2.5, +(heightM || 1.70)));
-  const M = Math.max(20, Math.min(300, +(massKg || 70)));
 
+  // Rough empirical heuristics (direct measurement recommended)
   const kneeW = isF ? 0.055 * H : 0.058 * H;
   const ankleW = isF ? 0.038 * H : 0.041 * H;
   const asisDist = isF ? 0.148 * H : 0.136 * H;
 
+  // Published segment lengths (Winter 2009 / Drillis & Contini 1966)
   const thighL = 0.245 * H;
   const shankL = 0.246 * H;
   const footL = 0.152 * H;
 
-  // De Leva (1996) segment mass ratios
+  // Published segment mass ratios (De Leva 1996)
   const thighMass = M * (isF ? 0.1478 : 0.1416);
   const shankMass = M * (isF ? 0.0481 : 0.0433);
   const footMass = M * (isF ? 0.0129 : 0.0137);
@@ -1025,6 +1029,7 @@ function estimateAnthropometry(heightM, massKg, sex) {
     kneeW: +kneeW.toFixed(4),
     ankleW: +ankleW.toFixed(4),
     asisDist: +asisDist.toFixed(4),
+    isRoughEstimate: true,
     lengths: {
       thigh: +thighL.toFixed(4),
       shank: +shankL.toFixed(4),
