@@ -1,0 +1,366 @@
+<title>PrimaLab</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Thai:wght@400;500;600&display=swap">
+<style>
+/* Layout: marker/info panel left, 3D stage right (Mokka-like); stacks on phones.
+   Scene is always a dark viewport; chrome follows the viewer's theme. */
+:root {
+  --bg: #EFEBE2; --panel: #F8F6F0; --panel-2: #E6DFF3; --line: #D0C3F1;
+  --fg: #272030; --fg-2: #4E2780; --accent: #AB1D79; --accent-ink: #FFFFFF;
+  --ok: #1E7F4F; --warn: #9A5B00; --err: #B3261E;
+  --font: "IBM Plex Sans Thai", system-ui, "Noto Sans Thai", "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #272030; --panel: #31283F; --panel-2: #3E3252; --line: #4E2780;
+    --fg: #EFEBE2; --fg-2: #D0C3F1; --accent: #EF94CA; --accent-ink: #272030;
+    --ok: #5CD08F; --warn: #F2B24C; --err: #FF7A70; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #272030; --panel: #31283F; --panel-2: #3E3252; --line: #4E2780;
+  --fg: #EFEBE2; --fg-2: #D0C3F1; --accent: #EF94CA; --accent-ink: #272030;
+  --ok: #5CD08F; --warn: #F2B24C; --err: #FF7A70; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--font); font-size: 14px; line-height: 1.5;
+  padding-block: 14px 28px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.shell { max-width: 1480px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
+
+.bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; }
+.brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.mark { width: 30px; height: 30px; flex: none; border: 2px solid var(--accent); border-radius: 50%; position: relative; }
+.mark::before, .mark::after { content: ""; position: absolute; background: var(--accent); }
+.mark::before { left: 50%; top: -5px; bottom: -5px; width: 2px; margin-left: -1px; }
+.mark::after { top: 50%; left: -5px; right: -5px; height: 2px; margin-top: -1px; }
+h1 { font-size: 18px; line-height: 1.2; margin: 0; font-weight: 600; letter-spacing: .01em; }
+.sub { margin: 0; font: 400 11.5px var(--mono); color: var(--fg-2); }
+.bar-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; padding: 0 12px;
+  border: 1px solid var(--line); border-radius: 5px; background: var(--panel); color: var(--fg); white-space: nowrap; user-select: none;
+}
+.btn:hover { background: var(--panel-2); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+.btn.primary:hover { filter: brightness(1.06); }
+.btn[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.btn.sm { min-height: 28px; padding: 0 9px; font-size: 12.5px; }
+.badge { font: 500 11.5px var(--mono); padding: 3px 8px; border: 1px solid var(--warn); color: var(--warn); border-radius: 4px; }
+
+.app { display: grid; grid-template-columns: 300px minmax(0, 1fr); grid-template-areas: "side stage"; gap: 12px; align-items: start; }
+.stage { grid-area: stage; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.app.nosideb { grid-template-columns: minmax(0, 1fr); grid-template-areas: "stage"; }
+.app.nosideb .side { display: none; }
+.side { grid-area: side; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
+.viewport { position: relative; height: clamp(340px, 58vh, 660px); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: #121315; }
+.viewport canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
+.viewport canvas:active { cursor: grabbing; }
+.vp-tools { position: absolute; top: 10px; right: 10px; display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; max-width: 70%; }
+.vp-tools button {
+  min-height: 26px; padding: 0 9px; border-radius: 4px; border: 1px solid rgba(208,195,241,.28);
+  background: rgba(13,14,16,.62); color: #EFEBE2; font: 500 11.5px var(--mono);
+}
+.vp-tools button:hover { background: rgba(70,72,78,.9); }
+.vp-hint { position: absolute; left: 12px; right: 12px; bottom: 10px; pointer-events: none; text-align: right; font: 400 11px var(--mono); color: rgba(208,195,241,.6); }
+.drop { position: absolute; inset: 8px; border: 2px dashed var(--accent); border-radius: 6px; display: flex; align-items: center; justify-content: center; background: rgba(13,14,16,.8); color: #EFEBE2; font-size: 16px; pointer-events: none; }
+
+.optbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; padding: 8px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+.optbar label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; white-space: nowrap; }
+.optbar input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; }
+.optbar select { min-height: 28px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); padding: 0 6px; }
+.optbar input[type="range"] { width: 90px; accent-color: var(--accent); }
+.optbar .grow { flex: 1; }
+.linkcount { font: 400 12px var(--mono); color: var(--fg-2); }
+
+.transport { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 8px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+.tcontrols { display: flex; gap: 6px; }
+.tcontrols .btn { width: 36px; padding: 0; }
+.tcontrols svg { width: 16px; height: 16px; fill: currentColor; }
+.track { position: relative; height: 34px; display: flex; align-items: center; }
+.track input[type="range"] { width: 100%; margin: 0; accent-color: var(--accent); height: 28px; position: relative; z-index: 1; background: transparent; }
+.ticks { position: absolute; left: 8px; right: 8px; top: 2px; bottom: 2px; pointer-events: none; }
+.ticks span { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--fg-2); opacity: .55; }
+.ticks span::after { content: attr(data-l); position: absolute; top: -2px; left: 4px; font: 500 10px var(--mono); color: var(--fg-2); white-space: nowrap; }
+.tright { display: flex; align-items: center; gap: 10px; }
+.readout { font: 500 12.5px var(--mono); min-width: 168px; text-align: right; }
+.transport select { min-height: 28px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); padding: 0 4px; }
+.transport label { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; }
+.transport input[type="checkbox"] { accent-color: var(--accent); }
+
+.chartbox { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.charthead { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+.tabs { display: flex; flex-wrap: wrap; gap: 4px; }
+.tabs button { min-height: 26px; padding: 0 10px; border: 1px solid var(--line); border-radius: 4px; background: transparent; font-size: 12.5px; }
+.tabs button[aria-selected="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.tabs button:disabled { opacity: .4; cursor: not-allowed; }
+.chartpair { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.chartpair.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.chartpair .chartbox { min-width: 0; }
+.cmp { margin-left: auto; }
+@media (max-width: 900px) { .chartpair.two { grid-template-columns: minmax(0, 1fr); } }
+.ctitle { font: 500 12px var(--mono); color: var(--fg-2); }
+.chartbox canvas { display: block; width: 100%; height: 200px; }
+
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+.card h2 { margin: 0; padding: 9px 12px; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--fg-2); border-bottom: 1px solid var(--line); font-weight: 600; }
+dl.info { margin: 0; padding: 8px 12px 10px; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 12px; font-size: 13px; }
+dl.info dt { color: var(--fg-2); }
+dl.info dd { margin: 0; font-family: var(--mono); font-size: 12.5px; overflow-wrap: anywhere; }
+.note { margin: 0 12px 10px; padding: 7px 9px; border-radius: 4px; border: 1px solid var(--line); font-size: 12.5px; overflow-wrap: anywhere; }
+.note.err { border-color: var(--err); color: var(--err); }
+.note.warn { border-color: var(--warn); color: var(--warn); }
+
+.mhead { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.mhead input[type="search"] { flex: 1 1 110px; min-width: 0; min-height: 28px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); padding: 0 8px; }
+.mlist { list-style: none; margin: 0; padding: 4px; max-height: 420px; overflow-y: auto; }
+.mrow { display: grid; grid-template-columns: 22px 12px minmax(0, 1fr) auto; align-items: center; gap: 8px; min-height: 30px; padding: 0 8px 0 6px; border-radius: 4px; cursor: pointer; }
+.mrow:hover { background: var(--panel-2); }
+.mrow.sel { background: color-mix(in srgb, var(--accent) 16%, transparent); box-shadow: inset 2px 0 0 var(--accent); }
+.mrow input { accent-color: var(--accent); margin: 0; width: 15px; height: 15px; }
+.sw { width: 12px; height: 12px; border-radius: 50%; border: 1px solid rgba(0,0,0,.25); }
+.mname { font: 500 12.5px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mgap { font: 400 11px var(--mono); color: var(--warn); }
+.mrow.unl .mname { color: var(--fg-2); }
+.keys { padding: 8px 12px 10px; font-size: 12px; color: var(--fg-2); line-height: 1.7; }
+kbd { font: 500 11px var(--mono); padding: 1px 5px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; background: var(--bg); color: var(--fg); }
+
+@media (max-width: 900px) {
+  .app { grid-template-columns: minmax(0, 1fr); grid-template-areas: "stage" "side"; }
+  .transport { grid-template-columns: auto minmax(0, 1fr); }
+  .tright { grid-column: 1 / -1; justify-content: space-between; flex-wrap: wrap; }
+  .readout { text-align: left; }
+  .vp-tools { max-width: 100%; }
+  .vp-hint { display: none; }
+  .viewport { height: clamp(300px, 52vh, 520px); }
+  .mlist { max-height: 300px; }
+}
+.angform{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;margin-bottom:10px;font-size:12px}
+.angform label{display:flex;flex-direction:column;gap:2px;color:var(--fg-2)}
+.angform label.wide{grid-column:1/-1;flex-direction:row;align-items:center;gap:6px}
+.angform input[type=number]{width:100%;min-width:0;font:inherit;padding:4px 6px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--fg)}
+#jsel{font:inherit;font-size:12px;margin-left:6px}
+.fapanel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 12px; }
+.fahead { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; margin-bottom: 10px; }
+.fahead h2 { margin: 0; font-size: 14px; }
+.fahint { font-size: 12px; color: var(--fg-2); }
+.faform { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end; margin-bottom: 10px; }
+.faform label, .faph label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--fg-2); }
+.faform input[type=number], .faph input[type=number] { width: 92px; font: inherit; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); }
+.faform select { font: inherit; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); }
+.faform .two { display: flex; gap: 4px; }
+.faact { display: flex; gap: 6px; margin-left: auto; }
+.faph { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end; margin: 8px 0 10px; }
+.faph .phl { font-size: 12px; font-weight: 600; align-self: center; }
+#faOut > .chartbox { margin-bottom: 10px; }
+#faOut .note { margin: 0 0 8px; }
+.cmjc { height: 280px !important; }
+.cmjc.short { height: 170px !important; }
+.legend { display: inline-flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11.5px; color: var(--fg-2); }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+.subh { margin: 14px 0 6px; font-size: 12px; font-weight: 600; color: var(--fg-2); }
+.fagrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 10px; }
+.fgcard { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; background: var(--bg); min-width: 0; }
+.fgrp { font-size: 12px; font-weight: 600; margin: 0 0 4px; }
+.ftbl { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.ftbl td, .ftbl th { padding: 2px 3px; border-bottom: 1px solid var(--line); text-align: right; font-family: ui-monospace, Menlo, monospace; }
+.ftbl td:first-child, .ftbl th:first-child { text-align: left; font-family: inherit; }
+.ftbl th { color: var(--fg-2); font-weight: 500; }
+.ftbl tr:last-child td { border-bottom: 0; }
+</style>
+
+<div class="shell">
+  <header class="bar">
+    <div class="brand">
+      <span class="mark" aria-hidden="true"></span>
+      <div><h1>PrimaLab</h1><p class="sub">by Prima Motion · engine v0.2 · lab Z-up · หน่วยเมตร</p></div>
+    </div>
+    <div class="bar-actions">
+      <span id="badge" class="badge" hidden>ข้อมูลสังเคราะห์</span>
+      <button type="button" class="btn" id="bSide" title="ซ่อน/แสดงเมนูด้านข้าง เพื่อขยายหน้า 3D และกราฟ" aria-pressed="false">◧ เมนู</button>
+      <button type="button" class="btn" id="bLang" title="Switch to English" aria-label="Switch to English">EN</button>
+      <button id="btnSample" class="btn" type="button">โหลดตัวอย่าง</button>
+      <label class="btn primary" for="file">เปิดไฟล์ C3D</label>
+      <input id="file" type="file" accept=".c3d" hidden>
+    </div>
+  </header>
+
+  <main class="app">
+    <section class="stage" aria-label="มุมมอง 3D">
+      <div class="viewport" id="vp">
+        <canvas id="view" role="img" aria-label="มุมมอง 3D ของ marker"></canvas>
+        <div class="vp-tools" role="toolbar" aria-label="มุมมองกล้อง">
+          <button type="button" data-view="iso" title="มุมเฉียง">Iso</button>
+          <button type="button" data-view="top" title="มองจากด้านบน">Top</button>
+          <button type="button" data-view="x" title="มองข้าง แกน X ไปทางขวา">X→</button>
+          <button type="button" data-view="y" title="มองข้าง แกน Y ไปทางขวา">Y→</button>
+          <button type="button" data-view="fit" title="จัดให้พอดีกับข้อมูล">Fit</button>
+        </div>
+        <div class="vp-hint" id="hint">ลาก = หมุน · Shift/คลิกขวา+ลาก = เลื่อน · ล้อ = ซูม · คลิก marker = เลือก</div>
+        <div class="drop" id="drop" hidden>วางไฟล์ .c3d ที่นี่</div>
+      </div>
+
+      <div class="optbar" role="group" aria-label="ตัวเลือกการแสดงผล">
+        <label><input id="oLinks" type="checkbox" checked> Link</label>
+        <label><input id="oGrid" type="checkbox" checked> Grid</label>
+        <label><input id="oAxes" type="checkbox" checked> แกน Lab</label>
+        <label><input id="oPlates" type="checkbox" checked> Force plate / GRF</label>
+        <label><input id="oUnl" type="checkbox"> Unlabeled</label>
+        <label><input id="oBody" type="checkbox" checked> รูปร่าง segment</label>
+        <label><input id="oSegs" type="checkbox" checked> แกน segment / JC</label>
+        <label>ชื่อ marker
+          <select id="oLabels"><option value="none">ไม่แสดง</option><option value="selected" selected>เฉพาะที่เลือก</option><option value="all">ทั้งหมด</option></select>
+        </label>
+        <label>Trajectory
+          <select id="oTrail"><option value="0">ปิด</option><option value="0.5">0.5 s</option><option value="1">1 s</option><option value="-1">ทั้งหมด</option></select>
+        </label>
+        <label>ขนาด <input id="oSize" type="range" min="0.5" max="2.5" step="0.1" value="1" aria-label="ขนาด marker"></label>
+        <span class="grow"></span>
+        <button id="bLink" class="btn sm" type="button" aria-pressed="false" title="คลิก marker สองตัวเพื่อเพิ่มหรือลบ link">แก้ไข link</button>
+        <button id="bReset" class="btn sm" type="button" title="กลับไปใช้ link อัตโนมัติจากชื่อ marker">รีเซ็ต link</button>
+        <span id="linkCount" class="linkcount"></span>
+      </div>
+
+      <div class="transport" role="group" aria-label="ควบคุมเวลา">
+        <div class="tcontrols">
+          <button id="bPrev" class="btn" type="button" aria-label="เฟรมก่อนหน้า"><svg viewBox="0 0 16 16"><path d="M3 2h2v12H3zM13 2v12L6 8z"/></svg></button>
+          <button id="bPlay" class="btn" type="button" aria-label="เล่น"><svg id="icPlay" viewBox="0 0 16 16"><path d="M4 2l10 6-10 6z"/></svg><svg id="icPause" viewBox="0 0 16 16" hidden><path d="M3 2h4v12H3zM9 2h4v12H9z"/></svg></button>
+          <button id="bNext" class="btn" type="button" aria-label="เฟรมถัดไป"><svg viewBox="0 0 16 16"><path d="M11 2h2v12h-2zM3 2l7 6-7 6z"/></svg></button>
+        </div>
+        <div class="track"><div class="ticks" id="ticks"></div><input id="slider" type="range" min="0" max="0" value="0" aria-label="ตำแหน่งเฟรม"></div>
+        <div class="tright">
+          <span id="readout" class="readout">—</span>
+          <label>ความเร็ว
+            <select id="speed"><option value="0.1">0.1×</option><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
+          </label>
+          <label><input id="loop" type="checkbox" checked> วน</label>
+        </div>
+      </div>
+
+      <div class="chartpair" id="chartPair">
+      <div class="chartbox">
+        <div class="charthead">
+          <div class="tabs" role="tablist">
+            <button id="tabM" role="tab" aria-selected="true" type="button">Marker X/Y/Z</button>
+            <button id="tabG" role="tab" aria-selected="false" type="button">GRF</button>
+            <button id="tabA" role="tab" aria-selected="false" type="button">มุมข้อต่อ</button>
+            <button id="tabF" role="tab" aria-selected="false" type="button">Force analysis</button>
+            <select id="jsel" aria-label="เลือกข้อต่อ" hidden><option value="RHip">R Hip</option><option value="RKnee" selected>R Knee</option><option value="RAnkle">R Ankle</option><option value="LHip">L Hip</option><option value="LKnee">L Knee</option><option value="LAnkle">L Ankle</option></select>
+          </div>
+          <span class="ctitle" id="ctitle">—</span>
+          <button class="btn sm cmp" id="bCmp" type="button" aria-pressed="false">เทียบ 2 กราฟ</button>
+        </div>
+        <canvas id="chart" role="img" aria-label="กราฟตามเวลา คลิกหรือลากเพื่อเลื่อนเฟรม"></canvas>
+      </div>
+      <div class="chartbox" id="boxB" hidden>
+        <div class="charthead">
+          <div class="tabs" role="tablist">
+            <button id="tabM2" role="tab" aria-selected="false" type="button">Marker X/Y/Z</button>
+            <button id="tabG2" role="tab" aria-selected="false" type="button">GRF</button>
+            <button id="tabA2" role="tab" aria-selected="true" type="button">มุมข้อต่อ</button>
+            <button id="tabF2" role="tab" aria-selected="false" type="button">Force analysis</button>
+            <select id="jsel2" aria-label="เลือกข้อต่อ กราฟ B"><option value="RHip">R Hip</option><option value="RKnee">R Knee</option><option value="RAnkle">R Ankle</option><option value="LHip">L Hip</option><option value="LKnee" selected>L Knee</option><option value="LAnkle">L Ankle</option></select>
+            <select id="msel2" aria-label="เลือก marker กราฟ B" hidden></select>
+          </div>
+          <span class="ctitle" id="ctitle2">—</span>
+        </div>
+        <canvas id="chart2" role="img" aria-label="กราฟตามเวลา B คลิกหรือลากเพื่อเลื่อนเฟรม"></canvas>
+      </div>
+      </div>
+
+      <section class="fapanel" id="faPanel" aria-labelledby="hFa" hidden>
+        <div class="fahead">
+          <h2 id="hFa">CMJ analysis · force plate ใน C3D</h2>
+          <span class="fahint" id="faHint"></span>
+        </div>
+        <div class="faform">
+          <label>Filter <select id="fFilter"><option value="butter" selected>Butterworth LPF</option><option value="ma">Moving average</option><option value="raw">Raw</option></select></label>
+          <label>Cutoff (Hz) <input id="fCut" type="number" min="5" step="1" value="50"></label>
+          <label>BW reference <select id="fBw"><option value="auto" selected>Auto quiet window</option><option value="window">เลือกช่วงเวลา</option><option value="mass">ใส่มวลกาย</option></select></label>
+          <label>มวลกาย (kg) <input id="fMass" type="number" min="20" max="250" step="0.5" value="70"></label>
+          <label>Quiet เริ่ม (s) <input id="fQ0" type="number" min="0" step="0.01" value="0"></label>
+          <label>Quiet จบ (s) <input id="fQ1" type="number" min="0" step="0.01" value="0.5"></label>
+          <label>fn ของ plate (Hz) <input id="fFn" type="number" min="0" step="10" value="0"></label>
+          <label id="fLRbox" hidden>Plate ซ้าย / ขวา <span class="two"><select id="fPL"></select><select id="fPR"></select></span></label>
+          <span class="faact"><button id="bFa" class="btn primary" type="button">วิเคราะห์ FP</button><button id="bFaCsv" class="btn" type="button" disabled>ส่งออก CSV</button></span>
+        </div>
+        <div id="faOut" hidden>
+          <p class="note" id="faNote"></p>
+          <div class="faph" id="faPh">
+            <span class="phl">เวลา phase (s)</span>
+            <label>Start <input id="pS" type="number" step="0.001"></label><label>Braking <input id="pB" type="number" step="0.001"></label>
+            <label>Split <input id="pZ" type="number" step="0.001"></label><label>Take-off <input id="pT" type="number" step="0.001"></label>
+            <label>Landing <input id="pL" type="number" step="0.001"></label>
+            <button id="bFaRe" class="btn sm" type="button">คำนวณใหม่</button><button id="bFaAuto" class="btn sm" type="button">กลับเป็น auto</button>
+          </div>
+          <div class="chartbox">
+            <div class="charthead"><span class="ctitle" id="cmjT1">—</span><span class="legend" id="cmjLeg"></span></div>
+            <canvas id="cmjF" class="cmjc" role="img" aria-label="กราฟแรงช่วง CMJ แยกตาม phase คลิกหรือลากเพื่อเลื่อนเฟรม"></canvas>
+          </div>
+          <div class="chartbox">
+            <div class="charthead"><span class="ctitle" id="cmjT2">—</span></div>
+            <canvas id="cmjV" class="cmjc short" role="img" aria-label="กราฟความเร็วจุดศูนย์กลางมวลช่วง CMJ"></canvas>
+          </div>
+          <div class="fagrid" id="faTbl"></div>
+          <h3 class="subh">Impact frequency (landing)</h3>
+          <div class="fagrid" id="faImp"></div>
+        </div>
+      </section>
+    </section>
+
+    <aside class="side">
+      <section class="card" aria-labelledby="hInfo">
+        <h2 id="hInfo">ไฟล์</h2>
+        <dl class="info" id="info"></dl>
+        <p class="note" id="note" hidden></p>
+      </section>
+      <section class="card" aria-labelledby="hAng">
+        <h2 id="hAng">มุมข้อต่อ (แบบ V3D)</h2>
+        <div class="angform">
+          <label>Static: frame เริ่ม <input id="aS0" type="number" min="0" value="0"></label>
+          <label>จำนวน frame <input id="aSN" type="number" min="1" value="10"></label>
+          <label>Knee width R (m) <input id="aKR" type="number" step="0.001" value="0.100"></label>
+          <label>Knee width L (m) <input id="aKL" type="number" step="0.001" value="0.100"></label>
+          <label>Ankle width R (m) <input id="aAR" type="number" step="0.001" value="0.070"></label>
+          <label>Ankle width L (m) <input id="aAL" type="number" step="0.001" value="0.070"></label>
+          <label>Marker radius (m) <input id="aMR" type="number" step="0.001" value="0.007"></label>
+          <label class="wide"><input id="aNorm" type="checkbox"> ลบค่าเฉลี่ยช่วง static (zero offset)</label>
+        </div>
+        <button id="bAng" class="btn primary" type="button">คำนวณมุมข้อต่อ</button>
+        <button id="bCsv" class="btn" type="button" disabled>ส่งออก CSV</button>
+        <p class="note" id="angNote">Cardan Z-X-Y · X=flex/ext, Y=ab/adduction, Z=axial · ค่า width เป็น placeholder ต้องวัดจริง · ยังไม่เทียบกับ Visual3D</p>
+      </section>
+      <section class="card" aria-labelledby="hMk">
+        <h2 id="hMk">Marker</h2>
+        <div class="mhead">
+          <input id="mfilter" type="search" placeholder="ค้นหาชื่อ" aria-label="ค้นหา marker">
+          <button id="mAll" class="btn sm" type="button">ทั้งหมด</button>
+          <button id="mNone" class="btn sm" type="button">ไม่เลือก</button>
+        </div>
+        <ul class="mlist" id="mlist"></ul>
+      </section>
+      <section class="card" aria-labelledby="hKeys">
+        <h2 id="hKeys">คีย์ลัด</h2>
+        <div class="keys"><kbd>Space</kbd> เล่น/หยุด · <kbd>←</kbd><kbd>→</kbd> ±1 เฟรม (<kbd>Shift</kbd> ±10) · <kbd>Home</kbd><kbd>End</kbd> · <kbd>F</kbd> Fit · <kbd>Esc</kbd> ยกเลิกโหมด link</div>
+      </section>
+    </aside>
+  </main>
+</div>
+
+<script>
+/*__ENGINE__*/
+</script>
+<script>
+/*__APP__*/
+</script>

@@ -1,0 +1,1449 @@
+/* =====================================================================
+   Mocap Viewer Engine  v0.1
+   - C3D reader (Intel/PC, float or int16 points, analog, force platform type 2/4, events)
+   - Dataset contract (frame source independent: C3D / NatNet / Rokoko can fill the same shape)
+   - Orbit camera + Canvas2D renderer (markers, links, trails, grid, plates, GRF, gizmo)
+   - ChartView (time series with synced cursor)
+   Lab convention: Z-up, metres. No external dependencies.
+   ===================================================================== */
+(function (root) {
+'use strict';
+const D2R = Math.PI / 180;
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+
+/* ---------------------------------------------------------------- Dataset contract
+   {
+     name, synthetic, rate, nFrames, firstFrame,
+     labels[], base[], side[] ('L'|'R'|'C'|'U'), prefix, nM,
+     pts: Float32Array(nFrames*nM*3)   metres, lab frame
+     vis: Uint8Array(nFrames*nM)       1 = valid
+     bounds: {min:[x,y,z], max:[x,y,z]}
+     plates: [{ index, type, supported, note, corners:[[x,y,z]x4] (m), F:Float32Array(n*3) N,
+                cop:Float32Array(n*3) m, on:Uint8Array(n), fzMax, flipped }]
+     events: [{frame, label, context}]
+     info: { unitsLabel, analogRate, analogChannels }
+   }
+------------------------------------------------------------------ */
+
+/* ---------------------------------------------------------------- naming helpers */
+function splitLabel(label) {
+  const k = label.lastIndexOf(':');
+  return k >= 0 ? { prefix: label.slice(0, k + 1), base: label.slice(k + 1) } : { prefix: '', base: label };
+}
+function isUnlabeled(base) { return /^(\*|unlabeled|unlabelled)/i.test(base); }
+function sideOf(base) {
+  if (isUnlabeled(base)) return 'U';
+  const b = base.toUpperCase();
+  if (/^L[A-Z]{2,}/.test(b) && !/^(LOW|LAT)/.test(b)) return 'L';
+  if (/^R[A-Z]{2,}/.test(b) && !/^(ROOT|REF)/.test(b)) return 'R';
+  if (/^(LEFT|L_|L\.)/i.test(base)) return 'L';
+  if (/^(RIGHT|R_|R\.)/i.test(base)) return 'R';
+  return 'C';
+}
+function finishDataset(ds) {
+  const nM = ds.labels.length;
+  ds.nM = nM;
+  ds.base = []; ds.side = [];
+  let prefix = null;
+  for (const l of ds.labels) {
+    const s = splitLabel(l);
+    ds.base.push(s.base);
+    ds.side.push(sideOf(s.base));
+    if (s.prefix && !isUnlabeled(s.base)) prefix = prefix === null ? s.prefix : (prefix === s.prefix ? prefix : '(หลาย prefix)');
+  }
+  ds.prefix = prefix || '';
+  // bounds + first-frame centroid
+  const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+  const step = Math.max(1, Math.floor(ds.nFrames / 400));
+  for (let f = 0; f < ds.nFrames; f += step)
+    for (let i = 0; i < nM; i++) {
+      if (!ds.vis[f * nM + i] || ds.side[i] === 'U') continue;
+      for (let a = 0; a < 3; a++) {
+        const v = ds.pts[(f * nM + i) * 3 + a];
+        if (v < mn[a]) mn[a] = v; if (v > mx[a]) mx[a] = v;
+      }
+    }
+  if (!isFinite(mn[0])) { mn[0] = mn[1] = -1; mn[2] = 0; mx[0] = mx[1] = 1; mx[2] = 2; }
+  ds.bounds = { min: mn, max: mx };
+  ds.plates = ds.plates || []; ds.events = ds.events || [];
+  return ds;
+}
+function validRatio(ds, i) {
+  let c = 0; for (let f = 0; f < ds.nFrames; f++) c += ds.vis[f * ds.nM + i];
+  return c / Math.max(1, ds.nFrames);
+}
+
+/* Default links for common marker names (Conventional lower / Plug-in Gait style).
+   Only pairs where both markers exist are used. */
+function defaultLinks(base) {
+  const idx = {}; base.forEach((b, i) => { idx[b.toUpperCase()] = i; });
+  const pairs = [['LASI', 'RASI'], ['RASI', 'RPSI'], ['RPSI', 'LPSI'], ['LPSI', 'LASI']];
+  for (const S of ['L', 'R']) {
+    pairs.push([S + 'ASI', S + 'THI'], [S + 'THI', S + 'KNE'], [S + 'KNE', S + 'TIB'], [S + 'TIB', S + 'ANK'],
+      [S + 'ANK', S + 'HEE'], [S + 'ANK', S + 'TOE'], [S + 'HEE', S + 'TOE'],
+      [S + 'SHO', S + 'ELB'], [S + 'ELB', S + 'WRA'], [S + 'WRA', S + 'WRB'], [S + 'WRA', S + 'FIN'], [S + 'WRB', S + 'FIN'],
+      ['C7', S + 'SHO']);
+  }
+  pairs.push(['LSHO', 'RSHO'], ['C7', 'T10'], ['CLAV', 'STRN'], ['C7', 'CLAV'], ['LFHD', 'RFHD'], ['RFHD', 'RBHD'], ['RBHD', 'LBHD'], ['LBHD', 'LFHD']);
+  const out = [];
+  for (const [a, b] of pairs) if (a in idx && b in idx) out.push([idx[a], idx[b]]);
+  return out;
+}
+
+
+/* ---------------------------------------------------------------- C3D reader */
+function ascii(u8, p, n) { let s = ''; for (let i = 0; i < n; i++) s += String.fromCharCode(u8[p + i]); return s; }
+
+function readC3D(buf, name) {
+  const dv = new DataView(buf), u8 = new Uint8Array(buf), N = u8.length;
+  if (N < 1024) throw new Error('ไฟล์เล็กเกินไปสำหรับ C3D');
+  const pblock = u8[0];
+  if (u8[1] !== 80) throw new Error('ไม่ใช่ไฟล์ C3D (byte ที่ 2 ของ header ต้องเป็น 80)');
+  const pbase = (pblock - 1) * 512;
+  const ptype = u8[pbase + 3];
+  if (ptype !== 84) throw new Error('รองรับเฉพาะ C3D แบบ Intel/PC (processor type 84) ไฟล์นี้เป็น type ' + ptype);
+
+  const hdr = {
+    first: dv.getUint16(6, true), last: dv.getUint16(8, true), scale: dv.getFloat32(12, true),
+    dstart: dv.getUint16(16, true), spf: dv.getUint16(18, true), rate: dv.getFloat32(20, true)
+  };
+
+  /* parameters */
+  const groupsById = {}, raw = [];
+  let p = pbase + 4;
+  while (p + 4 < N) {
+    const nchar = dv.getInt8(p), gid = dv.getInt8(p + 1);
+    if (nchar === 0) break;
+    const nlen = Math.abs(nchar);
+    const pname = ascii(u8, p + 2, nlen).trim().toUpperCase();
+    const offPos = p + 2 + nlen;
+    const off = dv.getInt16(offPos, true);
+    const q = offPos + 2;
+    if (gid < 0) groupsById[-gid] = pname;
+    else {
+      const t = dv.getInt8(q), nd = u8[q + 1];
+      const dims = []; for (let i = 0; i < nd; i++) dims.push(u8[q + 2 + i]);
+      const dpos = q + 2 + nd;
+      const n = nd ? dims.reduce((a, b) => a * b, 1) : 1;
+      let val = null;
+      if (t === -1) val = u8.slice(dpos, dpos + n);
+      else if (t === 1) { val = new Int8Array(n); for (let i = 0; i < n; i++) val[i] = dv.getInt8(dpos + i); }
+      else if (t === 2) { val = new Int16Array(n); for (let i = 0; i < n; i++) val[i] = dv.getInt16(dpos + 2 * i, true); }
+      else if (t === 4) { val = new Float32Array(n); for (let i = 0; i < n; i++) val[i] = dv.getFloat32(dpos + 4 * i, true); }
+      raw.push({ gid, pname, t, dims, val });
+    }
+    if (off === 0) break;
+    p = offPos + off;
+  }
+  const P = {};
+  for (const r of raw) P[(groupsById[r.gid] || String(r.gid)) + ':' + r.pname] = r;
+  const num = (k, d) => { const r = P[k]; return r && r.val && r.val.length ? r.val[0] : d; };
+  const arr = (k) => { const r = P[k]; return r && r.val && r.t !== -1 ? r.val : null; };
+  const strs = (k) => {
+    const r = P[k]; if (!r || r.t !== -1) return [];
+    const w = r.dims[0], cnt = r.dims.length > 1 ? r.dims.slice(1).reduce((a, b) => a * b, 1) : 1;
+    const out = []; for (let i = 0; i < cnt; i++) out.push(ascii(r.val, i * w, w).replace(/\0/g, '').trim());
+    return out;
+  };
+
+  const npts = num('POINT:USED', 0);
+  if (!npts) throw new Error('ไม่พบ POINT:USED ในไฟล์ (ไม่มีข้อมูล marker)');
+  const pscale = num('POINT:SCALE', hdr.scale);
+  const rate = num('POINT:RATE', hdr.rate) || hdr.rate;
+  const dstart = num('POINT:DATA_START', hdr.dstart) || hdr.dstart;
+  const framesParam = num('POINT:FRAMES', 0) & 0xFFFF;
+  let nfr = framesParam > 0 && framesParam !== 0xFFFF ? framesParam : Math.max(0, hdr.last - hdr.first + 1);
+  const floatData = pscale < 0;
+  const esz = floatData ? 4 : 2;
+  const na = num('ANALOG:USED', 0) | 0;
+  const arate = num('ANALOG:RATE', 0);
+  const spf = na && rate ? Math.max(1, Math.round(arate / rate)) : 0;
+  const fsize = npts * 4 * esz + na * spf * esz;
+  const base = (dstart - 1) * 512;
+  const avail = Math.floor((N - base) / fsize);
+  const warnings = [];
+  if (avail < nfr) { warnings.push('ไฟล์สั้นกว่าจำนวนเฟรมที่ header ระบุ (' + avail + ' จาก ' + nfr + ')'); nfr = avail; }
+  if (nfr <= 0) throw new Error('อ่านจำนวนเฟรมไม่ได้');
+
+  let labels = strs('POINT:LABELS');
+  for (let k = 2; k <= 9 && labels.length < npts; k++) labels = labels.concat(strs('POINT:LABELS' + k));
+  labels = labels.slice(0, npts);
+  while (labels.length < npts) labels.push('M' + (labels.length + 1));
+
+  const unitsStr = (strs('POINT:UNITS')[0] || '').toLowerCase();
+  let us = unitsStr === 'mm' ? 0.001 : unitsStr === 'cm' ? 0.01 : unitsStr === 'm' ? 1 : null;
+
+  /* point data (file units first, convert after units are known) */
+  const pts = new Float32Array(nfr * npts * 3), vis = new Uint8Array(nfr * npts);
+  const resid = new Float32Array(nfr * npts);
+  for (let f = 0; f < nfr; f++) {
+    let o = base + f * fsize;
+    for (let i = 0; i < npts; i++) {
+      let x, y, z, r;
+      if (floatData) { x = dv.getFloat32(o, true); y = dv.getFloat32(o + 4, true); z = dv.getFloat32(o + 8, true); r = dv.getFloat32(o + 12, true); o += 16; }
+      else { x = dv.getInt16(o, true) * pscale; y = dv.getInt16(o + 2, true) * pscale; z = dv.getInt16(o + 4, true) * pscale; r = dv.getInt16(o + 6, true); o += 8; }
+      const k = f * npts + i;
+      const ok = isFinite(x) && isFinite(y) && isFinite(z) && !(x === 0 && y === 0 && z === 0) && r >= 0;
+      vis[k] = ok ? 1 : 0; resid[k] = r;
+      pts[k * 3] = ok ? x : 0; pts[k * 3 + 1] = ok ? y : 0; pts[k * 3 + 2] = ok ? z : 0;
+    }
+  }
+  if (us === null) { // guess from magnitude
+    const m = []; for (let k = 0; k < pts.length && m.length < 3000; k += 97) if (pts[k]) m.push(Math.abs(pts[k]));
+    m.sort((a, b) => a - b); const med = m.length ? m[m.length >> 1] : 0;
+    us = med > 20 ? 0.001 : 1; warnings.push('ไม่พบ POINT:UNITS เดาหน่วยเป็น ' + (us === 1 ? 'เมตร' : 'มิลลิเมตร'));
+  }
+  if (us !== 1) for (let k = 0; k < pts.length; k++) pts[k] *= us;
+
+  /* analog */
+  let analog = null, analogLabels = [];
+  if (na > 0 && spf > 0) {
+    analog = new Float32Array(nfr * spf * na);
+    const ascale = arr('ANALOG:SCALE'), aoff = arr('ANALOG:OFFSET'), gen = num('ANALOG:GEN_SCALE', 1) || 1;
+    const unsigned = (strs('ANALOG:FORMAT')[0] || '').toUpperCase().indexOf('UNSIGNED') === 0;
+    analogLabels = strs('ANALOG:LABELS');
+    for (let f = 0; f < nfr; f++) {
+      const ao = base + f * fsize + npts * 4 * esz;
+      for (let s = 0; s < spf; s++) for (let c = 0; c < na; c++) {
+        const pos = ao + (s * na + c) * esz;
+        let v;
+        if (floatData) v = dv.getFloat32(pos, true);
+        else {
+          const rv = unsigned ? dv.getUint16(pos, true) : dv.getInt16(pos, true);
+          v = (rv - (aoff ? aoff[c] : 0)) * (ascale ? ascale[c] : 1) * gen;
+        }
+        analog[(f * spf + s) * na + c] = v;
+      }
+    }
+  }
+
+  /* force platforms */
+  const plates = [];
+  const fpUsed = num('FORCE_PLATFORM:USED', 0) | 0;
+  if (fpUsed > 0) {
+    const TYPE = arr('FORCE_PLATFORM:TYPE'), CORNERS = arr('FORCE_PLATFORM:CORNERS'), ORIGIN = arr('FORCE_PLATFORM:ORIGIN');
+    const CHAN = P['FORCE_PLATFORM:CHANNEL'], CAL = arr('FORCE_PLATFORM:CAL_MATRIX') || arr('FORCE_PLATFORM:CALMATRIX');
+    const ZERO = arr('FORCE_PLATFORM:ZERO');
+    for (let k = 0; k < fpUsed; k++) {
+      const type = TYPE ? TYPE[k] : 0;
+      const pl = { index: k + 1, type, supported: false, note: '', corners: null };
+      if (CORNERS) {
+        pl.corners = [];
+        for (let j = 0; j < 4; j++) pl.corners.push([0, 1, 2].map(i => CORNERS[i + 3 * (j + 4 * k)] * us));
+      }
+      if (!pl.corners || !ORIGIN || !CHAN || !analog) { pl.note = 'พารามิเตอร์ force plate ไม่ครบ'; plates.push(pl); continue; }
+      if (type !== 2 && type !== 4) { pl.note = 'ยังไม่รองรับ FP_TYPE ' + type + ' (รองรับ 2 และ 4)'; plates.push(pl); continue; }
+      const nc = CHAN.dims[0];
+      const ch = []; for (let c = 0; c < 6; c++) ch.push(CHAN.val[c + nc * k] - 1);
+      if (ch.some(c => c < 0 || c >= na)) { pl.note = 'index ของ analog channel ไม่ถูกต้อง'; plates.push(pl); continue; }
+      const org = [0, 1, 2].map(i => ORIGIN[i + 3 * k]);
+      let cal = null;
+      if (type === 4) {
+        if (!CAL || CAL.length < 36 * (k + 1)) { pl.note = 'FP_TYPE 4 แต่ไม่มี CAL_MATRIX'; plates.push(pl); continue; }
+        cal = (r, c) => CAL[r + 6 * (c + 6 * k) ];
+      }
+      // baseline (FP_ZERO)
+      const base0 = [0, 0, 0, 0, 0, 0];
+      if (ZERO && ZERO.length >= 2 && ZERO[0] > 0 && ZERO[1] >= ZERO[0]) {
+        const s0 = (ZERO[0] - 1) * spf, s1 = Math.min(nfr * spf, ZERO[1] * spf);
+        const cnt = Math.max(1, s1 - s0);
+        for (let c = 0; c < 6; c++) { let a = 0; for (let s = s0; s < s1; s++) a += analog[s * na + ch[c]]; base0[c] = a / cnt; }
+      }
+      // plate frame from corners (C3D order: +x+y, -x+y, -x-y, +x-y)
+      const C = pl.corners, sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+      const nrm = v => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; };
+      const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+      const ex = nrm(sub(C[0], C[1])), ey = nrm(sub(C[0], C[3])), ez = cross(ex, ey);
+      const cen = [0, 1, 2].map(i => (C[0][i] + C[1][i] + C[2][i] + C[3][i]) / 4);
+      const F = new Float32Array(nfr * 3), cop = new Float32Array(nfr * 3), on = new Uint8Array(nfr);
+      const fz = new Float32Array(nfr);
+      let fzMax = 0, sumZ = 0, cntZ = 0;
+      const v = [0, 0, 0, 0, 0, 0], w = [0, 0, 0, 0, 0, 0];
+      for (let f = 0; f < nfr; f++) {
+        const s = f * spf;
+        for (let c = 0; c < 6; c++) v[c] = analog[s * na + ch[c]] - base0[c];
+        if (cal) for (let r = 0; r < 6; r++) { let a = 0; for (let c = 0; c < 6; c++) a += cal(r, c) * v[c]; w[r] = a; }
+        else for (let c = 0; c < 6; c++) w[c] = v[c];
+        const Fx = w[0], Fy = w[1], Fz = w[2], Mx = w[3], My = w[4];
+        for (let a = 0; a < 3; a++) F[f * 3 + a] = ex[a] * Fx + ey[a] * Fy + ez[a] * Fz;
+        fz[f] = F[f * 3 + 2];
+        const afz = Math.abs(Fz); if (afz > fzMax) fzMax = afz;
+        if (Math.abs(F[f * 3 + 2]) > 5) { sumZ += F[f * 3 + 2]; cntZ++; }
+        // COP in sensor-origin frame (file units) then to lab
+        if (afz > 1e-6) {
+          const rz = -org[2];
+          const px = (rz * Fx - My) / Fz, py = (Mx + rz * Fy) / Fz;
+          const ox = (org[0] + px) * us, oy = (org[1] + py) * us;
+          for (let a = 0; a < 3; a++) cop[f * 3 + a] = cen[a] + ex[a] * ox + ey[a] * oy;
+        }
+      }
+      const flipped = cntZ > 0 && sumZ < 0;
+      if (flipped) for (let i = 0; i < F.length; i++) F[i] = -F[i];
+      // full analog-rate vertical force in the lab frame (used by the force-analysis engine)
+      const fzFull = new Float32Array(nfr * spf), vv = [0, 0, 0, 0, 0, 0], ww = [0, 0, 0, 0, 0, 0];
+      for (let s = 0; s < nfr * spf; s++) {
+        for (let c = 0; c < 6; c++) vv[c] = analog[s * na + ch[c]] - base0[c];
+        if (cal) for (let r = 0; r < 6; r++) { let a = 0; for (let c = 0; c < 6; c++) a += cal(r, c) * vv[c]; ww[r] = a; }
+        else for (let c = 0; c < 6; c++) ww[c] = vv[c];
+        fzFull[s] = (ex[2] * ww[0] + ey[2] * ww[1] + ez[2] * ww[2]) * (flipped ? -1 : 1);
+      }
+      const thr = Math.max(10, 0.02 * fzMax);
+      for (let f = 0; f < nfr; f++) on[f] = Math.abs(F[f * 3 + 2]) > thr ? 1 : 0;
+      Object.assign(pl, { supported: true, F, cop, on, fzMax, flipped, fzFull, note: 'FP_TYPE ' + type + (flipped ? ' · กลับเครื่องหมายแรงให้ชี้ขึ้น' : '') });
+      plates.push(pl);
+    }
+  }
+
+  /* events */
+  const events = [];
+  const evN = num('EVENT:USED', 0) | 0;
+  if (evN > 0) {
+    const T = arr('EVENT:TIMES'), L = strs('EVENT:LABELS'), Cx = strs('EVENT:CONTEXTS');
+    for (let i = 0; i < evN && T; i++) {
+      const t = T[2 * i] * 60 + T[2 * i + 1];
+      const fr = Math.round(t * rate - (hdr.first - 1));
+      if (fr >= 0 && fr < nfr) events.push({ frame: fr, label: L[i] || 'Event', context: Cx[i] || '' });
+    }
+  }
+
+  const ds = {
+    name: name || 'C3D', synthetic: false, rate, nFrames: nfr, firstFrame: hdr.first, labels,
+    pts, vis, plates, events, warnings,
+    info: { unitsLabel: unitsStr || '(เดา)', analogRate: arate, analogChannels: na, floatData }
+  };
+  return finishDataset(ds);
+}
+
+/* ---------------------------------------------------------------- Synthetic sample (CMJ, lower-body 16 markers) */
+function mulberry32(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+function makeSyntheticCMJ() {
+  const rate = 200, T = 4.5, n = Math.round(T * rate), g = 9.81, mass = 70;
+  const names = ['LASI', 'RASI', 'LPSI', 'RPSI', 'LKNE', 'RKNE', 'LTHI', 'RTHI', 'LANK', 'RANK', 'LTIB', 'RTIB', 'LTOE', 'RTOE', 'LHEE', 'RHEE'];
+  const labels = names.map(s => 'Skeleton_001:' + s).concat(['Unlabeled 1001', 'Unlabeled 1002']);
+  const nM = labels.length, pts = new Float32Array(n * nM * 3), vis = new Uint8Array(n * nM);
+  const rnd = mulberry32(7);
+  const gauss = () => Math.sqrt(-2 * Math.log(rnd() + 1e-9)) * Math.cos(2 * Math.PI * rnd());
+  const Ls = 0.42, Lt = 0.43, toeX = 0.22, toeZ = 0.03;
+  const ease = { cos: u => 0.5 - 0.5 * Math.cos(Math.PI * u), in: u => u * u, out: u => 1 - (1 - u) * (1 - u) };
+  const kf = (keys, t) => {
+    if (t <= keys[0][0]) return keys[0][1];
+    for (let i = 0; i < keys.length - 1; i++) {
+      const a = keys[i], b = keys[i + 1];
+      if (t <= b[0]) return a[1] + (b[1] - a[1]) * ease[b[2] || 'cos']((t - a[0]) / (b[0] - a[0]));
+    }
+    return keys[keys.length - 1][1];
+  };
+  const K = [[0, 5], [1.0, 5], [1.6, 82], [1.9, 10, 'in'], [2.13, 34], [2.36, 12], [2.85, 72, 'out'], [3.6, 6], [4.5, 5]];
+  const PSI = [[0, 0], [1.75, 0], [1.9, 36, 'in'], [2.13, 40], [2.30, 26], [2.36, 8], [2.5, 2], [2.7, 0], [4.5, 0]];
+  const t0 = 1.9, t1 = 2.36;
+  const hipX = new Float32Array(n), hipZ = new Float32Array(n), ankX = new Float32Array(n), psiA = new Float32Array(n);
+  for (let f = 0; f < n; f++) {
+    const t = f / rate;
+    const k = kf(K, t) * D2R, psi = kf(PSI, t) * D2R, phi = 0.45 * k;
+    const zoff = t > t0 && t < t1 ? 0.5 * g * (t - t0) * (t1 - t) : 0;
+    const ths = 0.38 * k, tht = ths - k;
+    const ax = toeX + (-0.18 * Math.cos(psi) + 0.05 * Math.sin(psi));
+    const az = toeZ + (0.18 * Math.sin(psi) + 0.05 * Math.cos(psi)) + zoff;
+    const kx = ax + Ls * Math.sin(ths), kz = az + Ls * Math.cos(ths);
+    const hx = kx + Lt * Math.sin(tht), hz = kz + Lt * Math.cos(tht);
+    hipX[f] = hx; hipZ[f] = hz; ankX[f] = ax; psiA[f] = psi;
+    const rot = (x, z, a) => [x * Math.cos(a) + z * Math.sin(a), -x * Math.sin(a) + z * Math.cos(a)];
+    const put = (i, x, y, z) => {
+      const o = (f * nM + i) * 3;
+      pts[o] = x + gauss() * 0.0008; pts[o + 1] = y + gauss() * 0.0008; pts[o + 2] = z + gauss() * 0.0008;
+      vis[f * nM + i] = 1;
+    };
+    for (let i = 0; i < 16; i++) {
+      const nm = names[i], s = nm[0] === 'L' ? 1 : -1, part = nm.slice(1);
+      if (part === 'ASI') { const r = rot(0.10, 0.07, phi); put(i, hx + r[0], s * 0.12, hz + r[1]); }
+      else if (part === 'PSI') { const r = rot(-0.07, 0.09, phi); put(i, hx + r[0], s * 0.05, hz + r[1]); }
+      else if (part === 'KNE') put(i, kx, s * 0.055, kz);
+      else if (part === 'THI') put(i, kx + 0.55 * Lt * Math.sin(tht), s * 0.09, kz + 0.55 * Lt * Math.cos(tht));
+      else if (part === 'ANK') put(i, ax, s * 0.05, az);
+      else if (part === 'TIB') put(i, ax + 0.55 * Ls * Math.sin(ths), s * 0.07, az + 0.55 * Ls * Math.cos(ths));
+      else if (part === 'TOE') put(i, toeX, s * 0.04, toeZ + zoff);
+      else if (part === 'HEE') { const r = rot(-0.07, -0.05, psi); put(i, ax + r[0], s * 0.03, az + r[1]); }
+    }
+    if (f >= 100 && f <= 400) { const o = (f * nM + 16) * 3; pts[o] = 0.8 + gauss() * 0.002; pts[o + 1] = 0.5; pts[o + 2] = 0.9 + gauss() * 0.002; vis[f * nM + 16] = 1; }
+    if (f >= 500 && f <= 700) { const o = (f * nM + 17) * 3; pts[o] = -0.6; pts[o + 1] = -0.7 + gauss() * 0.002; pts[o + 2] = 1.1; vis[f * nM + 17] = 1; }
+  }
+  // demo gap on LTHI (index 6) frames 300..345
+  for (let f = 300; f <= 345; f++) { vis[f * nM + 6] = 0; const o = (f * nM + 6) * 3; pts[o] = pts[o + 1] = pts[o + 2] = 0; }
+
+  // synthetic GRF from hip height (rough COM), smoothed
+  const fz = new Float32Array(n), fx = new Float32Array(n);
+  for (let f = 2; f < n - 2; f++) {
+    fz[f] = mass * (g + (hipZ[f + 1] - 2 * hipZ[f] + hipZ[f - 1]) * rate * rate);
+    fx[f] = mass * (hipX[f + 1] - 2 * hipX[f] + hipX[f - 1]) * rate * rate;
+  }
+  const sm = (a, w) => { const o = new Float32Array(n); for (let f = 0; f < n; f++) { let s = 0, c = 0; for (let k = -w; k <= w; k++) { const j = f + k; if (j >= 0 && j < n) { s += a[j]; c++; } } o[f] = s / c; } return o; };
+  const fzs = sm(sm(fz, 6), 6), fxs = sm(sm(fx, 6), 6);
+  const F = new Float32Array(n * 3), cop = new Float32Array(n * 3), on = new Uint8Array(n);
+  let fzMax = 0;
+  for (let f = 0; f < n; f++) {
+    const t = f / rate, flight = t > t0 && t < t1;
+    const v = flight ? 0 : clamp(fzs[f], 0, 2200);
+    F[f * 3] = flight ? 0 : fxs[f]; F[f * 3 + 1] = 0; F[f * 3 + 2] = v;
+    cop[f * 3] = ankX[f] + 0.06 + 0.1 * Math.min(1, psiA[f] / (36 * D2R)); cop[f * 3 + 1] = 0.003 * gauss(); cop[f * 3 + 2] = 0;
+    on[f] = v > 20 ? 1 : 0; if (v > fzMax) fzMax = v;
+  }
+  const plate = { index: 1, type: 0, supported: true, note: 'แรงสังเคราะห์จากความสูงสะโพก (ไม่ใช่ข้อมูลวัดจริง)', flipped: false,
+    corners: [[0.4, 0.2, 0], [-0.2, 0.2, 0], [-0.2, -0.2, 0], [0.4, -0.2, 0]], F, cop, on, fzMax };
+  const ds = { name: 'ตัวอย่างสังเคราะห์ · CMJ lower-body 16 markers', synthetic: true, rate, nFrames: n, firstFrame: 1, labels,
+    pts, vis, plates: [plate], events: [{ frame: Math.round(t0 * rate), label: 'Take-off', context: '' }, { frame: Math.round(t1 * rate), label: 'Landing', context: '' }],
+    warnings: [], info: { unitsLabel: 'm', analogRate: 0, analogChannels: 0, floatData: true } };
+  return finishDataset(ds);
+}
+
+/* ---------------------------------------------------------------- colours */
+const AXIS = { x: '#F2555D', y: '#58C26A', z: '#4C8DFF' };
+function shade(hex, a) {
+  const n = parseInt(hex.slice(1), 16); let r = n >> 16, g = (n >> 8) & 255, b = n & 255;
+  if (a >= 0) { r += (255 - r) * a; g += (255 - g) * a; b += (255 - b) * a; } else { r *= 1 + a; g *= 1 + a; b *= 1 + a; }
+  return 'rgb(' + (r | 0) + ',' + (g | 0) + ',' + (b | 0) + ')';
+}
+const SIDE_COLOR = { L: '#D0C3F1', R: '#EF94CA', C: '#EFEBE2', U: '#8F7FB8' };
+const SIDE_SHADE = {}; for (const k in SIDE_COLOR) SIDE_SHADE[k] = { hi: shade(SIDE_COLOR[k], 0.6), mid: SIDE_COLOR[k], lo: shade(SIDE_COLOR[k], -0.45) };
+const MONO = '"IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace';
+
+/* ---------------------------------------------------------------- viewer */
+class MocapViewer {
+  constructor(canvas) {
+    this.canvas = canvas; this.ctx = canvas.getContext('2d');
+    this.cam = { az: -60, el: 22, dist: 4, target: [0.1, 0, 0.9], fov: 42 };
+    this.ds = null; this.f = 0; this.playing = false; this.speed = 1; this.loop = true;
+    this.opt = { links: true, grid: true, axes: true, labels: 'selected', plates: true, trail: 0, size: 1, unlabeled: false, segs: true, body: true };
+    this.kin = null;
+    this.visible = null; this.selected = -1; this.links = []; this.linkMode = false; this._pending = -1;
+    this.onframe = null; this.onselect = null; this.onlinks = null;
+    this.W = 0; this.H = 0; this.dpr = 1; this._dirty = true; this._scr = null;
+    this._ptr = new Map(); this._last = 0;
+    this._bind();
+    this._ro = new ResizeObserver(() => this._resize());
+    this._ro.observe(canvas);
+    this._resize();
+    this._raf = requestAnimationFrame(t => this._tick(t));
+  }
+  destroy() { cancelAnimationFrame(this._raf); this._ro.disconnect(); }
+  invalidate() { this._dirty = true; }
+
+  setDataset(ds) {
+    this.ds = ds; this.f = 0; this.playing = false; this.selected = -1; this._pending = -1;
+    this.visible = new Uint8Array(ds.nM); for (let i = 0; i < ds.nM; i++) this.visible[i] = ds.side[i] === 'U' ? 0 : 1;
+    this.links = defaultLinks(ds.base);
+    this._scr = new Float32Array(ds.nM * 3);
+    this.fit(); this._emitFrame(); this._dirty = true;
+    if (this.onlinks) this.onlinks(this.links);
+  }
+  setFrame(f) {
+    if (!this.ds) return;
+    this.f = clamp(f, 0, this.ds.nFrames - 1); this._dirty = true; this._emitFrame();
+  }
+  play() { if (!this.ds) return; if (this.f >= this.ds.nFrames - 1.001) this.f = 0; this.playing = true; this._last = 0; this._emitFrame(); }
+  pause() { this.playing = false; this._emitFrame(); }
+  toggle() { this.playing ? this.pause() : this.play(); }
+  _emitFrame() { if (this.onframe) this.onframe(this.f, this.playing); }
+
+  select(i) { this.selected = i; this._dirty = true; if (this.onselect) this.onselect(i); }
+  setVisible(i, v) { this.visible[i] = v ? 1 : 0; this._dirty = true; }
+  toggleLink(a, b) {
+    const k = this.links.findIndex(l => (l[0] === a && l[1] === b) || (l[0] === b && l[1] === a));
+    if (k >= 0) this.links.splice(k, 1); else this.links.push([a, b]);
+    this._dirty = true; if (this.onlinks) this.onlinks(this.links);
+  }
+
+  view(name) {
+    const c = this.cam;
+    if (name === 'iso') { c.az = -60; c.el = 22; }
+    else if (name === 'top') { c.az = -90; c.el = 89; }
+    else if (name === 'x') { c.az = -90; c.el = 0; }   // X to the right
+    else if (name === 'y') { c.az = 0; c.el = 0; }     // Y to the right
+    this._dirty = true;
+  }
+  fit() {
+    if (!this.ds) return;
+    const b = this.ds.bounds, c = this.cam;
+    c.target = [(b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2, Math.max(0.3, (b.min[2] + b.max[2]) / 2)];
+    const ext = Math.hypot(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]);
+    c.dist = clamp(ext * 1.2, 1.6, 40);
+    this._dirty = true;
+  }
+
+  /* ---- layout */
+  _resize() {
+    const r = this.canvas.getBoundingClientRect();
+    this.dpr = Math.min(2, window.devicePixelRatio || 1);
+    this.W = Math.max(1, Math.round(r.width)); this.H = Math.max(1, Math.round(r.height));
+    this.canvas.width = Math.round(this.W * this.dpr); this.canvas.height = Math.round(this.H * this.dpr);
+    this._dirty = true;
+  }
+  _tick(ts) {
+    if (this.playing && this.ds) {
+      if (this._last) {
+        const dt = Math.min(0.1, (ts - this._last) / 1000);
+        this.f += dt * this.ds.rate * this.speed;
+        if (this.f >= this.ds.nFrames - 1) {
+          if (this.loop) this.f = 0; else { this.f = this.ds.nFrames - 1; this.playing = false; }
+        }
+        this._emitFrame();
+      }
+      this._last = ts; this._dirty = true;
+    } else this._last = 0;
+    if (this._dirty) this.draw();
+    this._raf = requestAnimationFrame(t => this._tick(t));
+  }
+
+  /* ---- camera maths */
+  _prep() {
+    const c = this.cam, az = c.az * D2R, el = clamp(c.el, -89.5, 89.5) * D2R, ce = Math.cos(el);
+    const dir = [ce * Math.cos(az), ce * Math.sin(az), Math.sin(el)];
+    this.eye = [c.target[0] + dir[0] * c.dist, c.target[1] + dir[1] * c.dist, c.target[2] + dir[2] * c.dist];
+    const f = [-dir[0], -dir[1], -dir[2]];
+    let r = [f[1], -f[0], 0]; const rl = Math.hypot(r[0], r[1]) || 1; r = [r[0] / rl, r[1] / rl, 0];
+    const u = [r[1] * f[2] - r[2] * f[1], r[2] * f[0] - r[0] * f[2], r[0] * f[1] - r[1] * f[0]];
+    this.bf = f; this.br = r; this.bu = u;
+    this.focal = (this.H / 2) / Math.tan(c.fov * D2R / 2);
+  }
+  _cam(x, y, z) {
+    const e = this.eye, dx = x - e[0], dy = y - e[1], dz = z - e[2], r = this.br, u = this.bu, f = this.bf;
+    return [dx * r[0] + dy * r[1] + dz * r[2], dx * u[0] + dy * u[1] + dz * u[2], dx * f[0] + dy * f[1] + dz * f[2]];
+  }
+  _scrn(c) { const s = this.focal / c[2]; return [this.W / 2 + c[0] * s, this.H / 2 - c[1] * s, s]; }
+  proj(x, y, z) { const c = this._cam(x, y, z); return c[2] < 0.05 ? null : this._scrn(c); }
+  _seg(ctx, a, b) { // a,b = 3D points; adds to current path with near-plane clipping
+    let ca = this._cam(a[0], a[1], a[2]), cb = this._cam(b[0], b[1], b[2]); const n = 0.05;
+    if (ca[2] < n && cb[2] < n) return;
+    if (ca[2] < n) { const t = (n - ca[2]) / (cb[2] - ca[2]); ca = [ca[0] + t * (cb[0] - ca[0]), ca[1] + t * (cb[1] - ca[1]), n]; }
+    else if (cb[2] < n) { const t = (n - cb[2]) / (ca[2] - cb[2]); cb = [cb[0] + t * (ca[0] - cb[0]), cb[1] + t * (ca[1] - cb[1]), n]; }
+    const sa = this._scrn(ca), sb = this._scrn(cb);
+    ctx.moveTo(sa[0], sa[1]); ctx.lineTo(sb[0], sb[1]);
+  }
+
+  /* ---- data access (linear interpolation between frames) */
+  _pos(i, out) {
+    const ds = this.ds, nM = ds.nM, f0 = Math.floor(this.f), f1 = Math.min(ds.nFrames - 1, f0 + 1), a = this.f - f0;
+    const k0 = f0 * nM + i, k1 = f1 * nM + i;
+    if (!ds.vis[k0]) return false;
+    const p = ds.pts;
+    if (a > 0 && ds.vis[k1]) { for (let j = 0; j < 3; j++) out[j] = p[k0 * 3 + j] * (1 - a) + p[k1 * 3 + j] * a; }
+    else for (let j = 0; j < 3; j++) out[j] = p[k0 * 3 + j];
+    return true;
+  }
+
+  /* ---- drawing */
+  draw() {
+    this._dirty = false;
+    const ctx = this.ctx, W = this.W, H = this.H;
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    const bg = ctx.createLinearGradient(0, 0, 0, H); bg.addColorStop(0, '#2B2C2F'); bg.addColorStop(1, '#0D0E10');
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+    this._prep();
+    const ds = this.ds;
+    if (this.opt.grid) this._grid(ctx);
+    if (ds && this.opt.plates) this._plates(ctx);
+    if (this.opt.axes) this._labAxes(ctx);
+    if (ds) { this._trail(ctx); if (this.kin && this.opt.body) this._bodies(ctx); this._links(ctx); if (this.kin && this.opt.segs) this._kin(ctx); this._markers(ctx); if (this.opt.plates) this._grf(ctx); }
+    this._gizmo(ctx);
+    this._hud(ctx);
+  }
+  _grid(ctx) {
+    const b = this.ds ? this.ds.bounds : { min: [-2, -2, 0], max: [2, 2, 2] };
+    let x0 = b.min[0], x1 = b.max[0], y0 = b.min[1], y1 = b.max[1];
+    if (this.ds) for (const p of this.ds.plates) if (p.corners) for (const c of p.corners) { x0 = Math.min(x0, c[0]); x1 = Math.max(x1, c[0]); y0 = Math.min(y0, c[1]); y1 = Math.max(y1, c[1]); }
+    x0 = Math.min(x0, 0) - 0.6; y0 = Math.min(y0, 0) - 0.6; x1 += 0.6; y1 += 0.6;
+    const ext = Math.max(x1 - x0, y1 - y0);
+    const steps = [0.1, 0.25, 0.5, 1, 2, 5, 10]; let st = steps[steps.length - 1];
+    for (const s of steps) if (ext / s <= 22) { st = s; break; }
+    const gx0 = Math.floor(x0 / st) * st, gx1 = Math.ceil(x1 / st) * st, gy0 = Math.floor(y0 / st) * st, gy1 = Math.ceil(y1 / st) * st;
+    const major = Math.max(1, st), isMajor = v => Math.abs(v / major - Math.round(v / major)) < 1e-6;
+    for (const pass of [0, 1]) {
+      ctx.beginPath();
+      for (let x = gx0; x <= gx1 + 1e-9; x += st) if (isMajor(x) === !!pass) this._seg(ctx, [x, gy0, 0], [x, gy1, 0]);
+      for (let y = gy0; y <= gy1 + 1e-9; y += st) if (isMajor(y) === !!pass) this._seg(ctx, [gx0, y, 0], [gx1, y, 0]);
+      ctx.strokeStyle = pass ? 'rgba(208,195,241,0.34)' : 'rgba(208,195,241,0.14)'; ctx.lineWidth = 1; ctx.stroke();
+    }
+    this._gridStep = st;
+  }
+  _labAxes(ctx) {
+    const L = 0.3, axes = [[L, 0, 0, AXIS.x, 'X'], [0, L, 0, AXIS.y, 'Y'], [0, 0, L, AXIS.z, 'Z']];
+    ctx.lineWidth = 2; ctx.font = '600 11px ' + MONO; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (const a of axes) {
+      ctx.beginPath(); this._seg(ctx, [0, 0, 0], [a[0], a[1], a[2]]); ctx.strokeStyle = a[3]; ctx.stroke();
+      const p = this.proj(a[0] * 1.12, a[1] * 1.12, a[2] * 1.12); if (p) { ctx.fillStyle = a[3]; ctx.fillText(a[4], p[0], p[1]); }
+    }
+  }
+  _plates(ctx) {
+    const f = Math.min(this.ds.nFrames - 1, Math.round(this.f));
+    for (const pl of this.ds.plates) {
+      if (!pl.corners) continue;
+      const cs = pl.corners.map(c => this._cam(c[0], c[1], c[2]));
+      if (cs.some(c => c[2] < 0.05)) continue;
+      const sc = cs.map(c => this._scrn(c));
+      const active = pl.supported && pl.on && pl.on[f];
+      ctx.beginPath(); ctx.moveTo(sc[0][0], sc[0][1]); for (let k = 1; k < 4; k++) ctx.lineTo(sc[k][0], sc[k][1]); ctx.closePath();
+      ctx.fillStyle = active ? 'rgba(239,148,202,0.22)' : 'rgba(208,195,241,0.10)'; ctx.fill();
+      ctx.strokeStyle = active ? 'rgba(239,148,202,0.9)' : 'rgba(208,195,241,0.5)'; ctx.lineWidth = 1.2; ctx.stroke();
+      ctx.font = '500 10px ' + MONO; ctx.fillStyle = 'rgba(208,195,241,0.75)'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+      ctx.fillText('FP' + pl.index, sc[2][0] + 4, sc[2][1] + 3);
+    }
+  }
+  _trail(ctx) {
+    const ds = this.ds, i = this.selected, tr = this.opt.trail;
+    if (i < 0 || !tr || !this.visible[i]) return;
+    const cur = Math.floor(this.f);
+    const a = tr < 0 ? 0 : Math.max(0, cur - Math.round(tr * ds.rate));
+    const b = tr < 0 ? ds.nFrames - 1 : cur;
+    const stride = Math.max(1, Math.floor((b - a) / 1200));
+    const draw = (from, to, style, w) => {
+      ctx.beginPath(); let pen = false; let last = null;
+      for (let f = from; f <= to; f += stride) {
+        const k = f * ds.nM + i;
+        if (!ds.vis[k]) { pen = false; continue; }
+        const p = [ds.pts[k * 3], ds.pts[k * 3 + 1], ds.pts[k * 3 + 2]];
+        if (pen) this._seg(ctx, last, p);
+        last = p; pen = true;
+      }
+      ctx.strokeStyle = style; ctx.lineWidth = w; ctx.stroke();
+    };
+    if (tr < 0) draw(cur, b, 'rgba(255,255,255,0.18)', 1.2);
+    draw(a, cur, 'rgba(255,255,255,0.8)', 1.6);
+  }
+  _bodies(ctx) { // soft rounded segment shapes (tapered capsules + joint balls), far-to-near
+    const k = this.kin, f = clamp(Math.round(this.f), 0, this.ds.nFrames - 1), J = {}, o = [0, 0, 0];
+    for (const n in k.jc) { const a = k.jc[n], b = f * 3; if (a[b] === a[b]) J[n] = [a[b], a[b + 1], a[b + 2]]; }
+    const toe = {};
+    for (const s of ['R', 'L']) { const i = this.ds.base.indexOf(s + 'TOE'); if (i >= 0 && this._pos(i, o)) toe[s] = o.slice(); }
+    const items = [], COL = { R: '#EF94CA', L: '#D0C3F1', C: '#EFEBE2' };
+    const add = (a, b, r1, r2, col) => { if (a && b) items.push({ a, b, r1, r2, col }); };
+    for (const s of ['R', 'L']) {
+      const H = J[s + 'HJC'], K = J[s + 'KJC'], A = J[s + 'AJC'], c = COL[s];
+      add(H, K, 0.030, 0.022, c); add(K, A, 0.022, 0.017, c);
+      let T = toe[s];
+      if (!T && A && k.frames[s + 'FT']) { const a = k.frames[s + 'FT'], b = f * 12; if (a[b] === a[b]) T = [A[0] + a[b + 3] * 0.17, A[1] + a[b + 4] * 0.17, A[2] - 0.07]; }
+      if (T && A) { const A2 = [A[0], A[1], A[2] - 0.03]; add(A2, [T[0], T[1], T[2] + 0.015], 0.018, 0.013, c); }
+    }
+    if (J.RHJC && J.LHJC) {
+      const a = k.frames.RPV, b = f * 12, up = a && a[b] === a[b] ? [a[b + 6], a[b + 7], a[b + 8]] : [0, 0, 1];
+      const sh = p => [p[0] + up[0] * 0.03, p[1] + up[1] * 0.03, p[2] + up[2] * 0.03];
+      add(sh(J.RHJC), sh(J.LHJC), 0.026, 0.026, COL.C);
+    }
+    const sp = (p) => { const c = this._cam(p[0], p[1], p[2]); return c[2] < 0.05 ? null : { s: this._scrn(c), z: c[2] }; };
+    const prim = [];
+    for (const it of items) { const A = sp(it.a), B = sp(it.b); if (A && B) prim.push({ it, A, B, z: (A.z + B.z) / 2 }); }
+    prim.sort((u, v) => v.z - u.z);
+    ctx.save(); ctx.globalAlpha = 0.9;
+    const ball = (x, y, r, col) => {
+      const g = ctx.createRadialGradient(x - r * 0.35, y - r * 0.4, r * 0.1, x, y, r);
+      g.addColorStop(0, shade(col, 0.45)); g.addColorStop(0.6, col); g.addColorStop(1, shade(col, -0.35));
+      ctx.beginPath(); ctx.arc(x, y, r, 0, 6.2832); ctx.fillStyle = g; ctx.fill();
+    };
+    for (const { it, A, B } of prim) {
+      const r1 = it.r1 * A.s[2], r2 = it.r2 * B.s[2], dx = B.s[0] - A.s[0], dy = B.s[1] - A.s[1], d = Math.hypot(dx, dy);
+      if (d > 0.5) {
+        const nx = -dy / d, ny = dx / d, g = ctx.createLinearGradient(A.s[0] - nx * r1, A.s[1] - ny * r1, A.s[0] + nx * r1, A.s[1] + ny * r1);
+        g.addColorStop(0, shade(it.col, 0.4)); g.addColorStop(0.45, it.col); g.addColorStop(1, shade(it.col, -0.4));
+        ctx.beginPath(); ctx.moveTo(A.s[0] + nx * r1, A.s[1] + ny * r1); ctx.lineTo(B.s[0] + nx * r2, B.s[1] + ny * r2);
+        ctx.lineTo(B.s[0] - nx * r2, B.s[1] - ny * r2); ctx.lineTo(A.s[0] - nx * r1, A.s[1] - ny * r1); ctx.closePath(); ctx.fillStyle = g; ctx.fill();
+      }
+      ball(A.s[0], A.s[1], r1, it.col); ball(B.s[0], B.s[1], r2, it.col);
+    }
+    ctx.restore();
+  }
+  _kin(ctx) {
+    const k = this.kin, f = clamp(Math.round(this.f), 0, this.ds.nFrames - 1), p = [0, 0, 0], q = [0, 0, 0], L = 0.09;
+    ctx.lineCap = 'round'; ctx.lineWidth = 2.4;
+    const cols = ['#FF5A4D', '#4ADE80', '#5AA9FF'];
+    for (const name of k.segNames) {
+      const a = k.frames[name], b = f * 12; if (a[b] !== a[b]) continue;
+      p[0] = a[b]; p[1] = a[b + 1]; p[2] = a[b + 2];
+      for (let c = 0; c < 3; c++) {
+        q[0] = p[0] + a[b + 3 + c * 3] * L; q[1] = p[1] + a[b + 4 + c * 3] * L; q[2] = p[2] + a[b + 5 + c * 3] * L;
+        ctx.beginPath(); this._seg(ctx, p, q); ctx.strokeStyle = cols[c]; ctx.stroke();
+      }
+    }
+    // joint centres
+    for (const j in k.jc) {
+      const a = k.jc[j], b = f * 3; if (a[b] !== a[b]) continue;
+      const c = this._cam(a[b], a[b + 1], a[b + 2]); if (c[2] < 0.05) continue;
+      const s = this._scrn(c), r = clamp(0.012 * s[2], 2.5, 8);
+      ctx.beginPath(); ctx.arc(s[0], s[1], r, 0, 6.2832); ctx.fillStyle = '#EFEBE2'; ctx.fill();
+      ctx.strokeStyle = 'rgba(13,14,16,0.9)'; ctx.lineWidth = 1.2; ctx.stroke();
+    }
+    ctx.lineWidth = 2.2;
+  }
+  _links(ctx) {
+    if (!this.opt.links) return;
+    const p = [0, 0, 0], q = [0, 0, 0];
+    ctx.lineWidth = 2.2; ctx.lineCap = 'round';
+    for (const [a, b] of this.links) {
+      if (!this.visible[a] || !this.visible[b] || !this._pos(a, p) || !this._pos(b, q)) continue;
+      const sa = this.ds.side[a], sb = this.ds.side[b];
+      ctx.beginPath(); this._seg(ctx, p, q);
+      ctx.strokeStyle = sa === sb && SIDE_COLOR[sa] ? SIDE_COLOR[sa] + 'B3' : 'rgba(208,195,241,0.5)';
+      ctx.stroke();
+    }
+  }
+  _markers(ctx) {
+    const ds = this.ds, nM = ds.nM, o = [0, 0, 0], prim = [];
+    this._scr.fill(0);
+    for (let i = 0; i < nM; i++) {
+      if (!this.visible[i] || !this._pos(i, o)) continue;
+      const c = this._cam(o[0], o[1], o[2]); if (c[2] < 0.05) continue;
+      const s = this._scrn(c);
+      const r = clamp(0.0165 * s[2] * this.opt.size, 2.5, 15);
+      prim.push([i, s[0], s[1], c[2], r]);
+      this._scr[i * 3] = s[0]; this._scr[i * 3 + 1] = s[1]; this._scr[i * 3 + 2] = r;
+    }
+    prim.sort((a, b) => b[3] - a[3]);
+    for (const [i, x, y, , r] of prim) {
+      const sh = SIDE_SHADE[ds.side[i]] || SIDE_SHADE.C;
+      const g = ctx.createRadialGradient(x - r * 0.35, y - r * 0.35, r * 0.1, x, y, r);
+      g.addColorStop(0, sh.hi); g.addColorStop(0.55, sh.mid); g.addColorStop(1, sh.lo);
+      ctx.beginPath(); ctx.arc(x, y, r, 0, 6.2832); ctx.fillStyle = g; ctx.fill();
+    }
+    // selection, pending link, labels
+    ctx.font = '500 11px ' + MONO; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
+    for (const [i, x, y, , r] of prim) {
+      const isSel = i === this.selected, isPend = i === this._pending;
+      if (isSel || isPend) { ctx.beginPath(); ctx.arc(x, y, r + 4, 0, 6.2832); ctx.strokeStyle = isPend ? '#EF94CA' : '#FFFFFF'; ctx.lineWidth = 2; ctx.stroke(); }
+      if (this.opt.labels === 'all' || (this.opt.labels === 'selected' && (isSel || isPend))) {
+        const t = ds.base[i];
+        ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(13,14,16,0.85)'; ctx.strokeText(t, x + r + 6, y);
+        ctx.fillStyle = '#EFEBE2'; ctx.fillText(t, x + r + 6, y);
+      }
+    }
+  }
+  _grf(ctx) {
+    const ds = this.ds, f = Math.floor(this.f);
+    let maxF = 0; for (const p of ds.plates) if (p.supported && p.fzMax > maxF) maxF = p.fzMax;
+    if (!maxF) return;
+    const k = 0.9 / maxF;
+    for (const pl of ds.plates) {
+      if (!pl.supported || !pl.on[f]) continue;
+      const cx = pl.cop[f * 3], cy = pl.cop[f * 3 + 1], cz = pl.cop[f * 3 + 2];
+      const tip = [cx + pl.F[f * 3] * k, cy + pl.F[f * 3 + 1] * k, cz + pl.F[f * 3 + 2] * k];
+      const a = this.proj(cx, cy, cz), b = this.proj(tip[0], tip[1], tip[2]);
+      if (!a || !b) continue;
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.strokeStyle = '#EF94CA'; ctx.lineWidth = 2.5; ctx.lineCap = 'round'; ctx.stroke();
+      const ang = Math.atan2(b[1] - a[1], b[0] - a[0]), h = 9;
+      ctx.beginPath(); ctx.moveTo(b[0], b[1]); ctx.lineTo(b[0] - h * Math.cos(ang - 0.4), b[1] - h * Math.sin(ang - 0.4)); ctx.lineTo(b[0] - h * Math.cos(ang + 0.4), b[1] - h * Math.sin(ang + 0.4)); ctx.closePath();
+      ctx.fillStyle = '#EF94CA'; ctx.fill();
+      ctx.beginPath(); ctx.arc(a[0], a[1], 3.5, 0, 6.2832); ctx.fillStyle = '#121315'; ctx.fill(); ctx.strokeStyle = '#EF94CA'; ctx.lineWidth = 1.6; ctx.stroke();
+    }
+  }
+  _gizmo(ctx) {
+    const cx = 46, cy = this.H - 46, L = 26, r = this.br, u = this.bu, f = this.bf;
+    const ax = [[1, 0, 0, AXIS.x, 'X'], [0, 1, 0, AXIS.y, 'Y'], [0, 0, 1, AXIS.z, 'Z']].map(a => ({
+      x: a[0] * r[0] + a[1] * r[1] + a[2] * r[2], y: a[0] * u[0] + a[1] * u[1] + a[2] * u[2], d: a[0] * f[0] + a[1] * f[1] + a[2] * f[2], c: a[3], t: a[4]
+    })).sort((a, b) => b.d - a.d);
+    ctx.beginPath(); ctx.arc(cx, cy, L + 12, 0, 6.2832); ctx.fillStyle = 'rgba(13,14,16,0.5)'; ctx.fill();
+    ctx.font = '600 11px ' + MONO; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.lineWidth = 2.2; ctx.lineCap = 'round';
+    for (const a of ax) {
+      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + a.x * L, cy - a.y * L); ctx.strokeStyle = a.c; ctx.stroke();
+      ctx.fillStyle = a.c; ctx.fillText(a.t, cx + a.x * (L + 8), cy - a.y * (L + 8));
+    }
+  }
+  _hud(ctx) {
+    const ds = this.ds; if (!ds) return;
+    const f = Math.floor(this.f);
+    ctx.font = '500 12px ' + MONO; ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillStyle = 'rgba(239,235,226,0.85)';
+    ctx.fillText('t ' + (this.f / ds.rate).toFixed(3) + ' s   f ' + (f + 1) + '/' + ds.nFrames, 12, 10);
+    if (this._gridStep) { ctx.fillStyle = 'rgba(208,195,241,0.6)'; ctx.font = '500 10.5px ' + MONO; ctx.fillText('grid ' + (this._gridStep >= 1 ? this._gridStep + ' m' : Math.round(this._gridStep * 100) + ' cm'), 12, 28); }
+  }
+
+  /* ---- interaction */
+  pick(x, y) {
+    if (!this._scr) return -1;
+    let best = -1, bd = 1e9;
+    for (let i = 0; i < this.ds.nM; i++) {
+      const r = this._scr[i * 3 + 2]; if (!r) continue;
+      const d = Math.hypot(this._scr[i * 3] - x, this._scr[i * 3 + 1] - y);
+      if (d < r + 9 && d < bd) { bd = d; best = i; }
+    }
+    return best;
+  }
+  _bind() {
+    const cv = this.canvas;
+    cv.style.touchAction = 'none';
+    cv.addEventListener('contextmenu', e => e.preventDefault());
+    cv.addEventListener('wheel', e => {
+      e.preventDefault(); const c = this.cam;
+      c.dist = clamp(c.dist * Math.exp(e.deltaY * 0.0012), 0.4, 60); this._dirty = true;
+    }, { passive: false });
+    cv.addEventListener('pointerdown', e => {
+      cv.setPointerCapture(e.pointerId);
+      this._ptr.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, t: performance.now(), btn: e.button, shift: e.shiftKey });
+    });
+    cv.addEventListener('pointermove', e => {
+      const p = this._ptr.get(e.pointerId); if (!p) return;
+      const dx = e.clientX - p.x, dy = e.clientY - p.y; p.x = e.clientX; p.y = e.clientY;
+      const c = this.cam;
+      if (this._ptr.size === 2) {
+        const [a, b] = [...this._ptr.values()];
+        const d = Math.hypot(a.x - b.x, a.y - b.y);
+        if (this._pinch) { c.dist = clamp(c.dist * this._pinch / Math.max(20, d), 0.4, 60); this._pan((dx) / 2, (dy) / 2); }
+        this._pinch = d; this._dirty = true; p.moved = true; return;
+      }
+      if (p.btn === 2 || p.btn === 1 || p.shift) this._pan(dx, dy);
+      else { c.az -= dx * 0.35; c.el = clamp(c.el + dy * 0.35, -89, 89); }
+      if (Math.hypot(e.clientX - p.sx, e.clientY - p.sy) > 4) p.moved = true;
+      this._dirty = true;
+    });
+    const up = e => {
+      const p = this._ptr.get(e.pointerId); this._ptr.delete(e.pointerId); this._pinch = 0;
+      if (!p || p.moved || !this.ds || e.type === 'pointercancel' || p.btn !== 0 || performance.now() - p.t > 600) return;
+      const r = cv.getBoundingClientRect(), i = this.pick(e.clientX - r.left, e.clientY - r.top);
+      if (this.linkMode) {
+        if (i < 0) this._pending = -1;
+        else if (this._pending < 0) this._pending = i;
+        else { if (i !== this._pending) this.toggleLink(this._pending, i); this._pending = -1; }
+        this._dirty = true;
+      } else this.select(i);
+    };
+    cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
+  }
+  _pan(dx, dy) {
+    const c = this.cam, s = c.dist / this.focal, r = this.br, u = this.bu;
+    for (let k = 0; k < 3; k++) c.target[k] += -r[k] * dx * s + u[k] * dy * s;
+  }
+  setLinkMode(on) { this.linkMode = !!on; this._pending = -1; this._dirty = true; }
+}
+
+/* ---------------------------------------------------------------- chart */
+function niceTicks(min, max, count) {
+  const span = (max - min) || 1, raw = span / count, p = Math.pow(10, Math.floor(Math.log10(raw))), e = raw / p;
+  const step = p * (e >= 7.5 ? 10 : e >= 3.5 ? 5 : e >= 1.5 ? 2 : 1);
+  const out = []; for (let v = Math.ceil(min / step) * step; v <= max + step * 1e-6; v += step) out.push(Math.abs(v) < step * 1e-9 ? 0 : v);
+  return { ticks: out, step };
+}
+class ChartView {
+  constructor(canvas) {
+    this.canvas = canvas; this.ctx = canvas.getContext('2d');
+    this.series = []; this.rate = 100; this.n = 0; this.events = []; this.cursor = 0; this.title = ''; this.unit = '';
+    this.theme = { fg: '#272030', fg2: '#4E2780', line: '#D0C3F1', accent: '#AB1D79', panel: '#F8F6F0' };
+    this.onseek = null; this.W = 0; this.H = 0; this.dpr = 1;
+    this.m = { l: 54, r: 14, t: 10, b: 26 };
+    canvas.style.touchAction = 'none';
+    const seek = e => {
+      if (!this.n || !this.onseek) return;
+      const r = canvas.getBoundingClientRect(), x = e.clientX - r.left, w = this.W - this.m.l - this.m.r;
+      this.onseek(clamp(Math.round((x - this.m.l) / w * (this.n - 1)), 0, this.n - 1));
+    };
+    canvas.addEventListener('pointerdown', e => { canvas.setPointerCapture(e.pointerId); this._drag = true; seek(e); });
+    canvas.addEventListener('pointermove', e => { if (this._drag) seek(e); });
+    canvas.addEventListener('pointerup', () => { this._drag = false; });
+    this._ro = new ResizeObserver(() => this._resize()); this._ro.observe(canvas); this._resize();
+  }
+  _resize() {
+    const r = this.canvas.getBoundingClientRect(); this.dpr = Math.min(2, window.devicePixelRatio || 1);
+    this.W = Math.max(1, Math.round(r.width)); this.H = Math.max(1, Math.round(r.height));
+    this.canvas.width = Math.round(this.W * this.dpr); this.canvas.height = Math.round(this.H * this.dpr); this.draw();
+  }
+  set(o) { Object.assign(this, o); this.draw(); }
+  draw() {
+    const ctx = this.ctx, W = this.W, H = this.H, m = this.m, th = this.theme;
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.fillStyle = th.panel; ctx.fillRect(0, 0, W, H);
+    const pw = W - m.l - m.r, ph = H - m.t - m.b;
+    ctx.font = '500 10.5px ' + MONO;
+    if (!this.series.length || !this.n || pw < 20 || ph < 20) {
+      ctx.fillStyle = th.fg2; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(this.empty || 'คลิก marker ในมุมมอง 3D หรือในรายการ เพื่อดูกราฟ', W / 2, H / 2); return;
+    }
+    let mn = Infinity, mx = -Infinity;
+    for (const s of this.series) for (let i = 0; i < this.n; i++) { const v = s.data[i]; if (v === v) { if (v < mn) mn = v; if (v > mx) mx = v; } }
+    if (!isFinite(mn)) { mn = -1; mx = 1; }
+    if (mx - mn < 1e-9) { mn -= 0.5; mx += 0.5; }
+    const pad = (mx - mn) * 0.06; mn -= pad; mx += pad;
+    const dur = (this.n - 1) / this.rate;
+    const X = i => m.l + i / (this.n - 1) * pw, Y = v => m.t + (1 - (v - mn) / (mx - mn)) * ph;
+    // grid
+    const yt = niceTicks(mn, mx, Math.max(2, Math.floor(ph / 34)));
+    const dec = Math.max(0, Math.min(4, -Math.floor(Math.log10(yt.step)) + (yt.step < 1 ? 0 : 0)));
+    ctx.textAlign = 'right'; ctx.textBaseline = 'middle'; ctx.lineWidth = 1;
+    for (const v of yt.ticks) {
+      const y = Math.round(Y(v)) + 0.5;
+      ctx.strokeStyle = th.line; ctx.globalAlpha = v === 0 ? 1 : 0.55; ctx.beginPath(); ctx.moveTo(m.l, y); ctx.lineTo(W - m.r, y); ctx.stroke(); ctx.globalAlpha = 1;
+      ctx.fillStyle = th.fg2; ctx.fillText(v.toFixed(dec), m.l - 6, y);
+    }
+    const t0 = this.t0 || 0, xt = niceTicks(t0, t0 + dur, Math.max(2, Math.floor(pw / 70)));
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    for (const t of xt.ticks) {
+      const x = Math.round(m.l + (t - t0) / dur * pw) + 0.5;
+      ctx.strokeStyle = th.line; ctx.globalAlpha = 0.35; ctx.beginPath(); ctx.moveTo(x, m.t); ctx.lineTo(x, m.t + ph); ctx.stroke(); ctx.globalAlpha = 1;
+      ctx.fillStyle = th.fg2; ctx.fillText(t.toFixed(xt.step < 1 ? 1 : 0) + ' s', x, m.t + ph + 6);
+    }
+    // phase bands + horizontal reference lines
+    if (this.bands) for (const b of this.bands) {
+      const x0 = X(clamp(b.from, 0, this.n - 1)), x1 = X(clamp(b.to, 0, this.n - 1)); if (x1 <= x0) continue;
+      ctx.fillStyle = b.color; ctx.fillRect(x0, m.t, x1 - x0, ph);
+      if (b.label && x1 - x0 > 26) { ctx.fillStyle = th.fg2; ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.fillText(b.label, (x0 + x1) / 2, m.t + 3); }
+    }
+    if (this.hlines) for (const h of this.hlines) {
+      if (h.v < mn || h.v > mx) continue; const y = Math.round(Y(h.v)) + 0.5;
+      ctx.setLineDash([6, 4]); ctx.strokeStyle = th.fg2; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(m.l, y); ctx.lineTo(W - m.r, y); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = th.fg2; ctx.textAlign = 'right'; ctx.textBaseline = 'bottom'; ctx.fillText(h.label, W - m.r - 4, y - 2);
+    }
+    // events
+    ctx.setLineDash([3, 3]);
+    for (const ev of this.events) {
+      const x = Math.round(X(ev.frame)) + 0.5;
+      ctx.strokeStyle = th.fg2; ctx.beginPath(); ctx.moveTo(x, m.t); ctx.lineTo(x, m.t + ph); ctx.stroke();
+      if (!this.noEventLabels) { ctx.fillStyle = th.fg2; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom'; ctx.fillText(ev.label, x + 4, m.t + ph - 2); }
+    }
+    ctx.setLineDash([]);
+    // series
+    const stride = Math.max(1, Math.floor(this.n / (pw * 1.5)));
+    ctx.lineWidth = 1.6; ctx.lineJoin = 'round';
+    for (const s of this.series) {
+      ctx.beginPath(); let pen = false;
+      for (let i = 0; i < this.n; i += stride) {
+        const v = s.data[i]; if (v !== v) { pen = false; continue; }
+        if (pen) ctx.lineTo(X(i), Y(v)); else ctx.moveTo(X(i), Y(v)); pen = true;
+      }
+      ctx.strokeStyle = s.color; ctx.stroke();
+    }
+    // cursor + legend values
+    const cf = clamp(Math.round(this.cursor), 0, this.n - 1), cx = Math.round(X(cf)) + 0.5;
+    ctx.strokeStyle = th.accent; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(cx, m.t); ctx.lineTo(cx, m.t + ph); ctx.stroke();
+    let lx = m.l + 8; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+    const ly = m.t + ph - 6;
+    for (const s of this.series) {
+      const v = s.data[cf];
+      ctx.fillStyle = s.color; ctx.fillRect(lx, ly - 9, 9, 3);
+      ctx.fillStyle = th.fg; const txt = s.name + ' ' + (v === v ? v.toFixed(this.dec == null ? 3 : this.dec) : '—');
+      ctx.fillText(txt, lx + 13, ly + 2); lx += ctx.measureText(txt).width + 30;
+    }
+  }
+}
+
+
+/* ---------------------------------------------------------------- lower-body kinematics (Visual3D-style, independent implementation)
+   Mirrors the logic of ConvLower16_v4_prefixed.mdh:
+   - Coda-type pelvis (ASIS + sacrum mid-PSIS), HJC by Bell regression (0.36 / -0.19 / -0.30 x ASIS distance)
+   - virtual medial knee/ankle = lateral marker shifted by (width + 2*marker radius) along static pelvis ML
+   - Visual_3D-type thigh/shank/foot: axial = proximal - distal, ML from lateral-medial markers (foot: ankle marker)
+   - segment local axes: X anterior, Y axial (up), Z medio-lateral toward subject's RIGHT for both sides
+   - static = mean of the first N frames; motion = rigid fit of the tracking set (Horn), anatomical frame carried along
+   - JOINT_ANGLE: Cardan Z-X-Y, R = Rz(a) Rx(b) Ry(g); a = about Z (flex/ext), b = about X (ab/adduction), g = about Y (axial)
+   Whether Visual3D reproduces these numbers exactly is NOT verified: compare with its export. */
+const V = {
+  sub: (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]], add: (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
+  mul: (a, s) => [a[0] * s, a[1] * s, a[2] * s], dot: (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2],
+  cross: (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]],
+  norm: a => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; },
+  mid: (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2]
+};
+const M3 = {
+  cols: (X, Y, Z) => [X[0], Y[0], Z[0], X[1], Y[1], Z[1], X[2], Y[2], Z[2]],
+  mul: (A, B) => { const o = new Array(9); for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) o[r * 3 + c] = A[r * 3] * B[c] + A[r * 3 + 1] * B[3 + c] + A[r * 3 + 2] * B[6 + c]; return o; },
+  T: A => [A[0], A[3], A[6], A[1], A[4], A[7], A[2], A[5], A[8]],
+  vec: (A, v) => [A[0] * v[0] + A[1] * v[1] + A[2] * v[2], A[3] * v[0] + A[4] * v[1] + A[5] * v[2], A[6] * v[0] + A[7] * v[1] + A[8] * v[2]],
+  col: (A, c) => [A[c], A[3 + c], A[6 + c]]
+};
+function eigMaxSym4(N) {
+  const a = N.map(r => r.slice()), v = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]];
+  for (let sw = 0; sw < 60; sw++) {
+    let off = 0; for (let i = 0; i < 4; i++) for (let j = i + 1; j < 4; j++) off += a[i][j] * a[i][j];
+    if (off < 1e-26) break;
+    for (let p = 0; p < 3; p++) for (let q = p + 1; q < 4; q++) {
+      if (Math.abs(a[p][q]) < 1e-300) continue;
+      const th = (a[q][q] - a[p][p]) / (2 * a[p][q]);
+      const t = (th >= 0 ? 1 : -1) / (Math.abs(th) + Math.sqrt(th * th + 1)), c = 1 / Math.sqrt(t * t + 1), s = t * c;
+      for (let k = 0; k < 4; k++) { const x = a[k][p], y = a[k][q]; a[k][p] = c * x - s * y; a[k][q] = s * x + c * y; }
+      for (let k = 0; k < 4; k++) { const x = a[p][k], y = a[q][k]; a[p][k] = c * x - s * y; a[q][k] = s * x + c * y; }
+      for (let k = 0; k < 4; k++) { const x = v[k][p], y = v[k][q]; v[k][p] = c * x - s * y; v[k][q] = s * x + c * y; }
+    }
+  }
+  let m = 0; for (let i = 1; i < 4; i++) if (a[i][i] > a[m][m]) m = i;
+  return [v[0][m], v[1][m], v[2][m], v[3][m]];
+}
+/* rigid transform B ~ R*A + t  (Horn 1987). A,B: arrays of [x,y,z] */
+function rigidFit(A, B) {
+  const n = A.length, ca = [0, 0, 0], cb = [0, 0, 0];
+  for (let i = 0; i < n; i++) for (let k = 0; k < 3; k++) { ca[k] += A[i][k] / n; cb[k] += B[i][k] / n; }
+  let Sxx = 0, Sxy = 0, Sxz = 0, Syx = 0, Syy = 0, Syz = 0, Szx = 0, Szy = 0, Szz = 0;
+  for (let i = 0; i < n; i++) {
+    const a = [A[i][0] - ca[0], A[i][1] - ca[1], A[i][2] - ca[2]], b = [B[i][0] - cb[0], B[i][1] - cb[1], B[i][2] - cb[2]];
+    Sxx += a[0] * b[0]; Sxy += a[0] * b[1]; Sxz += a[0] * b[2]; Syx += a[1] * b[0]; Syy += a[1] * b[1]; Syz += a[1] * b[2];
+    Szx += a[2] * b[0]; Szy += a[2] * b[1]; Szz += a[2] * b[2];
+  }
+  const q = eigMaxSym4([[Sxx + Syy + Szz, Syz - Szy, Szx - Sxz, Sxy - Syx], [Syz - Szy, Sxx - Syy - Szz, Sxy + Syx, Szx + Sxz],
+    [Szx - Sxz, Sxy + Syx, -Sxx + Syy - Szz, Syz + Szy], [Sxy - Syx, Szx + Sxz, Syz + Szy, -Sxx - Syy + Szz]]);
+  const l = Math.hypot(q[0], q[1], q[2], q[3]) || 1, w = q[0] / l, x = q[1] / l, y = q[2] / l, z = q[3] / l;
+  const R = [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y), 2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x),
+    2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)];
+  const Rca = M3.vec(R, ca);
+  return { R, t: [cb[0] - Rca[0], cb[1] - Rca[1], cb[2] - Rca[2]] };
+}
+/* R = Rz(a) Rx(b) Ry(g)  ->  degrees */
+function cardanZXY(R) {
+  return [Math.atan2(-R[1], R[4]) / D2R, Math.asin(clamp(R[7], -1, 1)) / D2R, Math.atan2(-R[6], R[8]) / D2R];
+}
+function rotZXY(aDeg, bDeg, gDeg) {
+  const a = aDeg * D2R, b = bDeg * D2R, g = gDeg * D2R, Rz = [Math.cos(a), -Math.sin(a), 0, Math.sin(a), Math.cos(a), 0, 0, 0, 1],
+    Rx = [1, 0, 0, 0, Math.cos(b), -Math.sin(b), 0, Math.sin(b), Math.cos(b)], Ry = [Math.cos(g), 0, Math.sin(g), 0, 1, 0, -Math.sin(g), 0, Math.cos(g)];
+  return M3.mul(M3.mul(Rz, Rx), Ry);
+}
+
+const LB_MARKERS = ['LASI', 'RASI', 'LPSI', 'RPSI', 'LKNE', 'RKNE', 'LTHI', 'RTHI', 'LANK', 'RANK', 'LTIB', 'RTIB', 'LTOE', 'RTOE', 'LHEE', 'RHEE'];
+const LB_DEFAULTS = { kneeW: 0.10, ankleW: 0.07, markerR: 0.007, staticStart: 0, staticN: 10, normalize: false };
+const LB_JOINTS = [['RHip', 'RTH', 'RPV'], ['RKnee', 'RSK', 'RTH'], ['RAnkle', 'RFT', 'RSK'], ['LHip', 'LTH', 'RPV'], ['LKnee', 'LSK', 'LTH'], ['LAnkle', 'LFT', 'LSK']];
+
+function computeLowerBody(ds, params) {
+  const p = Object.assign({}, LB_DEFAULTS, params || {});
+  const kw = s => (p.kneeW && typeof p.kneeW === 'object') ? p.kneeW[s] : p.kneeW, aw = s => (p.ankleW && typeof p.ankleW === 'object') ? p.ankleW[s] : p.ankleW;
+  const idx = {}, missing = [];
+  for (const n of LB_MARKERS) { const i = ds.base.findIndex(b => b.toUpperCase() === n); if (i < 0) missing.push(n); idx[n] = i; }
+  if (missing.length) return { ok: false, error: 'ไม่พบ marker: ' + missing.join(', ') };
+  const nF = ds.nFrames, nM = ds.nM, warnings = [];
+  const at = (n, f) => { const k = f * nM + idx[n]; return ds.vis[k] ? [ds.pts[k * 3], ds.pts[k * 3 + 1], ds.pts[k * 3 + 2]] : null; };
+  /* static mean + stability */
+  const s0 = clamp(p.staticStart | 0, 0, nF - 1), s1 = Math.min(nF, s0 + Math.max(1, p.staticN | 0));
+  const S = {}, staticMove = {};
+  for (const n of LB_MARKERS) {
+    const sum = [0, 0, 0]; let c = 0;
+    for (let f = s0; f < s1; f++) { const q = at(n, f); if (q) { sum[0] += q[0]; sum[1] += q[1]; sum[2] += q[2]; c++; } }
+    if (!c) return { ok: false, error: 'marker ' + n + ' ไม่มีข้อมูลในช่วง static' };
+    S[n] = [sum[0] / c, sum[1] / c, sum[2] / c];
+    let mx = 0; for (let f = s0; f < s1; f++) { const q = at(n, f); if (q) mx = Math.max(mx, Math.hypot(q[0] - S[n][0], q[1] - S[n][1], q[2] - S[n][2])); }
+    staticMove[n] = mx;
+  }
+  const maxMove = Math.max(...Object.values(staticMove));
+  if (maxMove > 0.005) warnings.push('marker ขยับในช่วง static สูงสุด ' + (maxMove * 1000).toFixed(1) + ' mm (>5 mm) ช่วง static อาจไม่นิ่ง');
+  /* static pelvis + landmarks */
+  const ML = V.norm(V.sub(S.RASI, S.LASI)), am = V.mid(S.RASI, S.LASI), sacrum = V.mid(S.RPSI, S.LPSI), D = Math.hypot(...V.sub(S.RASI, S.LASI));
+  const apRaw = V.sub(am, sacrum), AP = V.norm(V.sub(apRaw, V.mul(ML, V.dot(apRaw, ML)))), AX = V.cross(ML, AP);
+  const L = {};
+  L.RHJC = V.add(am, V.add(V.mul(ML, 0.36 * D), V.add(V.mul(AP, -0.19 * D), V.mul(AX, -0.30 * D))));
+  L.LHJC = V.add(am, V.add(V.mul(ML, -0.36 * D), V.add(V.mul(AP, -0.19 * D), V.mul(AX, -0.30 * D))));
+  L.RKNM = V.add(S.RKNE, V.mul(ML, -(kw('R') + 2 * p.markerR))); L.LKNM = V.add(S.LKNE, V.mul(ML, (kw('L') + 2 * p.markerR)));
+  L.RANM = V.add(S.RANK, V.mul(ML, -(aw('R') + 2 * p.markerR))); L.LANM = V.add(S.LANK, V.mul(ML, (aw('L') + 2 * p.markerR)));
+  L.RKJC = V.mid(S.RKNE, L.RKNM); L.LKJC = V.mid(S.LKNE, L.LKNM); L.RAJC = V.mid(S.RANK, L.RANM); L.LAJC = V.mid(S.LANK, L.LANM);
+  /* segment definitions: tracking set (markers or landmarks), static anatomical frame */
+  const frameFrom = (prox, dist, zRef) => {
+    const Y = V.norm(V.sub(prox, dist)); let Z = V.sub(zRef, V.mul(Y, V.dot(zRef, Y))); Z = V.norm(Z); return { o: prox, R: M3.cols(V.cross(Y, Z), Y, Z) };
+  };
+  const SEG = {};
+  SEG.RPV = { track: ['RASI', 'LASI', 'RPSI', 'LPSI'], frame: { o: V.mid(L.RHJC, L.LHJC), R: M3.cols(AP, AX, ML) } };
+  for (const s of ['R', 'L']) {
+    const rs = s === 'R' ? 1 : -1;
+    SEG[s + 'TH'] = { track: [s + 'HJC', s + 'KNE', s + 'THI'], frame: frameFrom(L[s + 'HJC'], L[s + 'KJC'], V.mul(V.sub(S[s + 'KNE'], L[s + 'KNM']), rs)) };
+    SEG[s + 'SK'] = { track: [s + 'TIB', s + 'ANK', s + 'KNE'], frame: frameFrom(L[s + 'KJC'], L[s + 'AJC'], V.mul(V.sub(S[s + 'ANK'], L[s + 'ANM']), rs)) };
+    SEG[s + 'FT'] = { track: [s + 'HEE', s + 'TOE', s + 'ANK'], frame: frameFrom(L[s + 'AJC'], S[s + 'TOE'], V.mul(V.sub(S[s + 'ANK'], L[s + 'AJC']), rs)) };
+  }
+  // names: thigh/shank/foot tracking uses SEG keys RTH,RSK,RFT / LTH,LSK,LFT; fix keys
+  const fix = { RTH: 'RTH', RSK: 'RSK', RFT: 'RFT', LTH: 'LTH', LSK: 'LSK', LFT: 'LFT', RPV: 'RPV' };
+  const segNames = Object.keys(fix);
+  const stat = n => (n in S ? S[n] : L[n]);
+  for (const k of segNames) SEG[k].A = SEG[k].track.map(stat);
+  /* static frame sanity: Y axis vs lab up */
+  const upTilt = {};
+  for (const k of segNames) { const Y = M3.col(SEG[k].frame.R, 1); upTilt[k] = Math.acos(clamp(Y[2], -1, 1)) / D2R; }
+  /* dynamic */
+  const out = { frames: {}, jc: {}, angles: {} };
+  for (const k of segNames) out.frames[k] = new Float32Array(nF * 12).fill(NaN);
+  for (const j of ['RHJC', 'LHJC', 'RKJC', 'LKJC', 'RAJC', 'LAJC']) out.jc[j] = new Float32Array(nF * 3).fill(NaN);
+  const pose = {}; let skipped = 0;
+  for (let f = 0; f < nF; f++) {
+    const cur = {}; let allOK = true;
+    for (const n of LB_MARKERS) { cur[n] = at(n, f); }
+    pose.RPV = null;
+    const fitSeg = (k, getter) => {
+      const B = []; for (const n of SEG[k].track) { const q = getter(n); if (!q) return null; B.push(q); }
+      return rigidFit(SEG[k].A, B);
+    };
+    const T = {};
+    T.RPV = fitSeg('RPV', n => cur[n]);
+    const lm = {};
+    if (T.RPV) { lm.RHJC = M3.vec(T.RPV.R, L.RHJC); lm.RHJC = V.add(lm.RHJC, T.RPV.t); lm.LHJC = V.add(M3.vec(T.RPV.R, L.LHJC), T.RPV.t); }
+    for (const s of ['R', 'L']) {
+      T[s + 'TH'] = fitSeg(s + 'TH', n => n === s + 'HJC' ? (lm[n] || null) : cur[n]);
+      T[s + 'SK'] = fitSeg(s + 'SK', n => cur[n]);
+      T[s + 'FT'] = fitSeg(s + 'FT', n => cur[n]);
+    }
+    const RA = {};
+    for (const k of segNames) {
+      const t = T[k]; if (!t) continue;
+      const Ra = M3.mul(t.R, SEG[k].frame.R), o = V.add(M3.vec(t.R, SEG[k].frame.o), t.t);
+      RA[k] = Ra; const b = f * 12;
+      out.frames[k][b] = o[0]; out.frames[k][b + 1] = o[1]; out.frames[k][b + 2] = o[2];
+      for (let c = 0; c < 3; c++) { const col = M3.col(Ra, c); out.frames[k][b + 3 + c * 3] = col[0]; out.frames[k][b + 4 + c * 3] = col[1]; out.frames[k][b + 5 + c * 3] = col[2]; }
+    }
+    const put = (name, v) => { out.jc[name][f * 3] = v[0]; out.jc[name][f * 3 + 1] = v[1]; out.jc[name][f * 3 + 2] = v[2]; };
+    if (lm.RHJC) { put('RHJC', lm.RHJC); put('LHJC', lm.LHJC); }
+    for (const s of ['R', 'L']) {
+      if (T[s + 'TH']) put(s + 'KJC', V.add(M3.vec(T[s + 'TH'].R, L[s + 'KJC']), T[s + 'TH'].t));
+      if (T[s + 'SK']) put(s + 'AJC', V.add(M3.vec(T[s + 'SK'].R, L[s + 'AJC']), T[s + 'SK'].t));
+    }
+    pose[f] = null;
+    for (const [jn, sg, rf] of LB_JOINTS) {
+      if (!out.angles[jn]) out.angles[jn] = { a: new Float32Array(nF).fill(NaN), b: new Float32Array(nF).fill(NaN), g: new Float32Array(nF).fill(NaN) };
+      if (!RA[sg] || !RA[rf]) { if (jn === 'RHip') skipped++; continue; }
+      const e = cardanZXY(M3.mul(M3.T(RA[rf]), RA[sg]));
+      out.angles[jn].a[f] = e[0]; out.angles[jn].b[f] = e[1]; out.angles[jn].g[f] = e[2];
+    }
+  }
+  /* unwrap + normalise */
+  const gimbal = {};
+  for (const jn in out.angles) {
+    const A = out.angles[jn];
+    for (const c of ['a', 'g']) { let prev = NaN, off = 0; const arr = A[c];
+      for (let f = 0; f < nF; f++) { let v = arr[f]; if (v !== v) continue; if (prev === prev) { const d = v + off - prev; if (d > 180) off -= 360 * Math.round(d / 360); else if (d < -180) off -= 360 * Math.round(d / 360); } v += off; arr[f] = v; prev = v; } }
+    let mxb = 0; for (let f = 0; f < nF; f++) { const v = Math.abs(A.b[f]); if (v === v && v > mxb) mxb = v; } gimbal[jn] = mxb;
+    if (p.normalize) for (const c of ['a', 'b', 'g']) { let s = 0, n = 0; for (let f = s0; f < s1; f++) { const v = A[c][f]; if (v === v) { s += v; n++; } } const m = n ? s / n : 0; for (let f = 0; f < nF; f++) A[c][f] -= m; }
+  }
+  for (const jn in gimbal) if (gimbal[jn] > 75) warnings.push(jn + ': มุมแกนกลาง (ab/adduction) สูงสุด ' + gimbal[jn].toFixed(0) + '° ใกล้ gimbal lock ค่ามุมสามแกนอาจไม่น่าเชื่อถือ');
+  const ranges = {};
+  for (const jn in out.angles) { ranges[jn] = {}; for (const c of ['a', 'b', 'g']) { let lo = Infinity, hi = -Infinity; for (let f = 0; f < nF; f++) { const v = out.angles[jn][c][f]; if (v === v) { if (v < lo) lo = v; if (v > hi) hi = v; } } ranges[jn][c] = [lo, hi]; } }
+  return { ok: true, params: p, warnings, angles: out.angles, frames: out.frames, jc: out.jc, ranges, upTilt, staticMove: maxMove, landmarks: L, staticRange: [s0, s1 - 1], asisDistance: D, segNames };
+}
+
+/* ---------------------------------------------------------------- Force-analysis engine
+   JavaScript port of RatTongiam/Force-Analysis (biomechanics.py, impact_frequency.py): CMJ phase detection,
+   metrics (Anicic et al. 2023 classification), landing impact frequency vs plate natural frequency.
+   Input = force plates embedded in the C3D (full analog rate Fz), never an external force file.
+   Numerics follow scipy: butter + filtfilt (odd padding, steady-state zi), rolling mean, tukey window, uniform_filter1d. */
+const FA = (() => {
+  const G = 9.80665;
+  /* ---- complex helpers for filter design */
+  const cmul = (a, b) => [a[0] * b[0] - a[1] * b[1], a[0] * b[1] + a[1] * b[0]];
+  const cdiv = (a, b) => { const d = b[0] * b[0] + b[1] * b[1]; return [(a[0] * b[0] + a[1] * b[1]) / d, (a[1] * b[0] - a[0] * b[1]) / d]; };
+  function polyFromRoots(r) {
+    let p = [[1, 0]];
+    for (const z of r) { const q = Array.from({ length: p.length + 1 }, () => [0, 0]); for (let i = 0; i < p.length; i++) { q[i][0] += p[i][0]; q[i][1] += p[i][1]; const m = cmul(p[i], z); q[i + 1][0] -= m[0]; q[i + 1][1] -= m[1]; } p = q; }
+    return p.map(c => c[0]);
+  }
+  function butter(order, Wn) {
+    const fs2 = 4, om = 4 * Math.tan(Math.PI * Wn / 2), pz = [];
+    let den = [1, 0];
+    for (let k = 0; k < order; k++) {
+      const m = -order + 1 + 2 * k, ang = Math.PI * m / (2 * order), p = [-Math.cos(ang) * om, -Math.sin(ang) * om];
+      pz.push(cdiv([fs2 + p[0], p[1]], [fs2 - p[0], -p[1]]));
+      den = cmul(den, [fs2 - p[0], -p[1]]);
+    }
+    const kz = Math.pow(om, order) * cdiv([1, 0], den)[0];
+    const a = polyFromRoots(pz), b = polyFromRoots(new Array(order).fill([-1, 0])).map(v => v * kz);
+    return { b, a };
+  }
+  function lfilter(b, a, x, zi) {
+    const n = Math.max(a.length, b.length) - 1, a0 = a[0], bb = b.map(v => v / a0), aa = a.map(v => v / a0);
+    const z = zi ? Array.from(zi) : new Array(n).fill(0), y = new Float64Array(x.length);
+    for (let i = 0; i < x.length; i++) {
+      const xi = x[i], yi = z[0] + bb[0] * xi;
+      for (let k = 0; k < n - 1; k++) z[k] = z[k + 1] + bb[k + 1] * xi - aa[k + 1] * yi;
+      z[n - 1] = bb[n] * xi - aa[n] * yi; y[i] = yi;
+    }
+    return y;
+  }
+  function solve(A, B) {
+    const n = B.length, M = A.map((r, i) => r.concat([B[i]]));
+    for (let c = 0; c < n; c++) {
+      let p = c; for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+      [M[c], M[p]] = [M[p], M[c]];
+      for (let r = 0; r < n; r++) if (r !== c) { const f = M[r][c] / M[c][c]; for (let k = c; k <= n; k++) M[r][k] -= f * M[c][k]; }
+    }
+    return M.map((r, i) => r[n] / r[i]);
+  }
+  function lfilterZi(b, a) {
+    const n = a.length - 1, a0 = a[0], aa = a.map(v => v / a0), bb = b.map(v => v / a0);
+    const A = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => (i === j ? 1 : 0)));
+    // companion(a)^T : C[0][j] = -a[j+1], C[i][i-1] = 1 ; subtract transpose
+    for (let j = 0; j < n; j++) A[j][0] += aa[j + 1];            // (C^T)[j][0] = C[0][j] = -aa[j+1]
+    for (let i = 1; i < n; i++) A[i - 1][i] -= 1;                // (C^T)[i-1][i] = C[i][i-1] = 1
+    const B = []; for (let i = 0; i < n; i++) B.push(bb[i + 1] - aa[i + 1] * bb[0]);
+    return solve(A, B);
+  }
+  function filtfilt(b, a, x, padlen) {
+    const n = x.length, e = padlen, ext = new Float64Array(n + 2 * e);
+    for (let i = 0; i < e; i++) ext[i] = 2 * x[0] - x[e - i];
+    for (let i = 0; i < n; i++) ext[e + i] = x[i];
+    for (let i = 0; i < e; i++) ext[e + n + i] = 2 * x[n - 1] - x[n - 2 - i];
+    const zi = lfilterZi(b, a);
+    let y = lfilter(b, a, ext, zi.map(v => v * ext[0]));
+    const r = new Float64Array(y.length); for (let i = 0; i < y.length; i++) r[i] = y[y.length - 1 - i];
+    y = lfilter(b, a, r, zi.map(v => v * r[0]));
+    const out = new Float64Array(n); for (let i = 0; i < n; i++) out[i] = y[y.length - 1 - e - i];
+    return out;
+  }
+  function butterLowpass(data, cutoff, fs, order = 4) {
+    const n = data.length; if (n <= order * 3) return Float64Array.from(data);
+    const wn = Math.max(0.01, Math.min(0.99, cutoff / (0.5 * fs))), { b, a } = butter(order, wn);
+    return filtfilt(b, a, data, Math.min(n - 1, Math.trunc(1.0 * fs)));
+  }
+  function movingAvg(x, w) {
+    const n = x.length, out = new Float64Array(n), lo = Math.floor((w - 1) / 2), hi = w - 1 - lo;
+    for (let i = 0; i < n; i++) { let s = 0, c = 0; for (let k = Math.max(0, i - lo); k <= Math.min(n - 1, i + hi); k++) { s += x[k]; c++; } out[i] = s / c; }
+    return out;
+  }
+  function applyFilter(x, type, cutoff, fs, win = 15) {
+    if (!x.length) return Float64Array.from(x);
+    if (type === 'butter') return butterLowpass(x, cutoff, fs, 4);
+    if (type === 'ma') return win <= 1 ? Float64Array.from(x) : movingAvg(x, win);
+    return Float64Array.from(x);
+  }
+  /* ---- small numerics */
+  const mean = (a, s = 0, e = a.length) => { if (e <= s) return 0; let t = 0; for (let i = s; i < e; i++) t += a[i]; return t / (e - s); };
+  const std = (a, s, e) => { const m = mean(a, s, e); let t = 0; for (let i = s; i < e; i++) t += (a[i] - m) ** 2; return Math.sqrt(t / Math.max(1, e - s)); };
+  const maxOf = (a, s, e) => { let m = -Infinity; for (let i = s; i < e; i++) if (a[i] > m) m = a[i]; return isFinite(m) ? m : 0; };
+  const argmax = (a, s, e) => { let k = s, m = -Infinity; for (let i = s; i < e; i++) if (a[i] > m) { m = a[i]; k = i; } return k; };
+  const argmin = (a, s, e) => { let k = s, m = Infinity; for (let i = s; i < e; i++) if (a[i] < m) { m = a[i]; k = i; } return k; };
+  const median = a => { const b = Array.from(a).sort((x, y) => x - y), n = b.length; return n % 2 ? b[(n - 1) / 2] : (b[n / 2 - 1] + b[n / 2]) / 2; };
+  function trap(a, s, e, dt) { const n = e - s; if (n < 2) return n === 1 ? a[s] * dt : 0; let t = 0; for (let i = s + 1; i < e; i++) t += 0.5 * (a[i - 1] + a[i]); return t * dt; }
+  const sl_ = (a, s, e) => a.subarray ? a.subarray(Math.max(0, s), Math.max(0, e)) : a.slice(Math.max(0, s), Math.max(0, e));
+  const deficit = (l, r) => { const m = Math.max(Math.abs(l), Math.abs(r)); return m === 0 ? '-' : (((l - r) / m * 100) >= 0 ? '+' : '') + ((l - r) / m * 100).toFixed(1) + '%'; };
+
+  function findQuietWindow(f, fs, winS = 0.5, minBw = 200, maxCv = 3, relTol = 0.15) {
+    const n = f.length, w = Math.round(winS * fs), out = { ok: false, start: null, end: null, bw: null, sd: null, cv: null, warnings: [] };
+    if (n < w + 1 || w < 2) { out.warnings.push('ไฟล์สั้นเกินไปสำหรับหา quiet window'); return out; }
+    const loaded = []; for (let i = 0; i < n; i++) if (f[i] > 100) loaded.push(f[i]);
+    if (loaded.length < w) { out.warnings.push('แทบไม่มีช่วงที่มีโหลดบนแผ่น (> 100 N)'); return out; }
+    const ref = median(loaded), step = Math.max(1, Math.round(0.02 * fs));
+    const c1 = new Float64Array(n + 1), c2 = new Float64Array(n + 1);
+    for (let i = 0; i < n; i++) { c1[i + 1] = c1[i] + f[i]; c2[i + 1] = c2[i] + f[i] * f[i]; }
+    let best = -1, bestCv = Infinity, bm = 0, bs = 0;
+    for (let s = 0; s <= n - w; s += step) {
+      const m = (c1[s + w] - c1[s]) / w, sd = Math.sqrt(Math.max((c2[s + w] - c2[s]) / w - m * m, 0)), cv = sd / Math.max(m, 1e-9) * 100;
+      if (m >= minBw && Math.abs(m - ref) <= relTol * ref && cv < bestCv) { best = s; bestCv = cv; bm = m; bs = sd; }
+    }
+    if (best < 0) { out.warnings.push(`ไม่พบช่วง ${winS.toFixed(1)} s ที่แรงรวมนิ่งใกล้ระดับโหลดปกติ (${ref.toFixed(0)} N)`); return out; }
+    Object.assign(out, { start: best, end: best + w, bw: bm, sd: bs, cv: bestCv });
+    if (bm < minBw) out.warnings.push(`BW ${bm.toFixed(0)} N ต่ำกว่า ${minBw} N`);
+    else if (bestCv > maxCv) out.warnings.push(`ช่วงยืนนิ่งที่ดีที่สุดยังมี CV ${bestCv.toFixed(1)}% (> ${maxCv}%)`);
+    else out.ok = true;
+    return out;
+  }
+  function bwReference(sf, sl, sr, q0, q1, bwOverride) {
+    q0 = Math.max(0, q0 | 0); q1 = Math.max(q0 + 1, q1 | 0);
+    const bw = mean(sf, q0, q1);
+    if (bwOverride) { let sh = bw > 50 ? mean(sl, q0, q1) / bw : 0.5; sh = Math.min(Math.max(sh, 0), 1); return { bw: bwOverride, sd: 0, l: bwOverride * sh, r: bwOverride * (1 - sh) }; }
+    return { bw, sd: std(sf, q0, q1), l: mean(sl, q0, q1), r: mean(sr, q0, q1) };
+  }
+  /* ---- phase detection (detect_phases_sequential) */
+  function detectPhases(sfRaw, dt, o) {
+    const n = sfRaw.length, fs = 1 / dt;
+    const sf = applyFilter(sfRaw, o.filterType, o.cutoff, fs);
+    const q0 = Math.max(0, o.quiet[0] | 0), q1 = Math.min(n, o.quiet[1] | 0);
+    const bw = o.bwOverride ? o.bwOverride : mean(sf, q0, q1), fsd = std(sf, q0, q1), mass = bw > 0 ? bw / G : 70;
+    // flight blocks: sf < 25 N
+    let tAuto = null, lAuto = null, bestLen = 0;
+    for (let i = 0; i < n;) {
+      if (sf[i] < 25) { let j = i; while (j + 1 < n && sf[j + 1] < 25) j++; const len = j - i + 1; if (len > Math.trunc(0.10 * fs) && i > Math.trunc(0.5 * fs) && len > bestLen) { bestLen = len; tAuto = i; lAuto = j; } i = j + 1; } else i++;
+    }
+    if (tAuto === null) { const gp = Math.trunc(0.5 * fs) + argmax(sf, Math.trunc(0.5 * fs), n) - Math.trunc(0.5 * fs); tAuto = Math.max(Math.trunc(0.5 * fs), gp - Math.trunc(0.2 * fs)); lAuto = Math.min(n - 1, tAuto + Math.trunc(0.4 * fs)); }
+    let offL = 0, offR = 0;
+    if (o.slRaw && o.srRaw && lAuto > tAuto) {
+      const a = tAuto + Math.trunc((lAuto - tAuto) * 0.25), b = tAuto + Math.trunc((lAuto - tAuto) * 0.75);
+      if (b > a) { offL = mean(o.slRaw, a, b); offR = mean(o.srRaw, a, b); }
+    }
+    const ps = Math.max(0, tAuto - Math.trunc(1.5 * fs));
+    const peakProp = tAuto > ps ? argmax(sf, ps, tAuto) : Math.max(0, tAuto - 1);
+    const bAuto = peakProp > ps ? argmin(sf, ps, peakProp) : Math.max(0, peakProp - Math.trunc(0.2 * fs));
+    const thr = Math.max(bw * 0.98, bw - 3 * fsd);
+    let sAuto = -1; for (let i = 0; i < bAuto; i++) if (sf[i] >= thr) sAuto = i;
+    if (sAuto < 0) sAuto = Math.max(0, bAuto - Math.trunc(0.4 * fs));
+    const len = tAuto - sAuto + 1, vel = new Float64Array(Math.max(0, len));
+    for (let k = 1; k < len; k++) vel[k] = vel[k - 1] + 0.5 * ((sf[sAuto + k - 1] - bw) / mass + (sf[sAuto + k] - bw) / mass) * dt;
+    const bRel = Math.max(0, bAuto - sAuto); let zAuto = bAuto;
+    for (let k = bRel; k < len; k++) if (vel[k] >= 0) { zAuto = bAuto + (k - bRel); break; }
+    let lL = lAuto, lR = lAuto;
+    if (o.slRaw && o.srRaw) {
+      const e = Math.min(n, tAuto + Math.trunc(1.2 * fs));
+      for (let i = tAuto + Math.trunc(0.05 * fs); i < e; i++) if (o.slRaw[i] - offL >= 15) { lL = i; break; }
+      for (let i = tAuto + Math.trunc(0.05 * fs); i < e; i++) if (o.srRaw[i] - offR >= 15) { lR = i; break; }
+    }
+    return { s: Math.min(sAuto, bAuto), b: Math.min(bAuto, zAuto), z: Math.min(zAuto, tAuto), t: Math.min(tAuto, n - 1), l: Math.min(lAuto, n - 1), lL, lR, offL, offR };
+  }
+  function rfdStart(a, s, dt, ms) { if (!a.length || s < 0 || s >= a.length) return 0; const k = Math.trunc((ms / 1000) / dt); if (k <= 0) return 0; return s + k < a.length ? (a[s + k] - a[s]) / (ms / 1000) : 0; }
+  function rfdWin(a, s, e, dt, winMs = 20) {
+    if (!a.length || s < 0 || e >= a.length || e <= s) return 0;
+    const w = Math.max(1, Math.trunc((winMs / 1000) / dt)); if (e - s <= w) return 0;
+    let m = -Infinity; for (let i = s; i + w <= e; i++) { const v = (a[i + w] - a[i]) / (w * dt); if (v > m) m = v; } return isFinite(m) ? m : 0;
+  }
+  /* ---- metrics (calculate_metrics, group_by="phase") */
+  function calcMetrics(sfRaw, slRaw, srRaw, dt, P, o) {
+    const n = sfRaw.length, fs = 1 / dt, t = i => i * dt;
+    const slz = slRaw.map(v => v - o.offL), srz = srRaw.map(v => v - o.offR), sfz = slz.map((v, i) => v + srz[i]);
+    const sf = applyFilter(sfz, o.filterType, o.cutoff, fs), sl = applyFilter(slz, o.filterType, o.cutoff, fs), sr = applyFilter(srz, o.filterType, o.cutoff, fs);
+    const q0 = Math.max(0, o.quiet[0] | 0), q1 = Math.min(n, o.quiet[1] | 0);
+    const ref = bwReference(sf, sl, sr, q0, q1, o.bwOverride), bw = ref.bw, mass = bw > 0 ? bw / G : 70;
+    const { s: sI, b: bI, z: zI, t: tI, l: lI } = P;
+    const vel = new Float64Array(n), disp = new Float64Array(n);
+    for (let i = sI + 1; i < Math.min(tI + 1, n); i++) {
+      vel[i] = vel[i - 1] + 0.5 * ((sf[i - 1] - bw) / mass + (sf[i] - bw) / mass) * dt;
+      disp[i] = disp[i - 1] + 0.5 * (vel[i - 1] + vel[i]) * dt;
+    }
+    const contraction = Math.max(dt, t(tI) - t(sI)), propDur = Math.max(0, t(tI) - t(zI)), unwDur = Math.max(0, t(bI) - t(sI)), brkDur = Math.max(0, t(zI) - t(bI)), fltDur = Math.max(0, t(lI) - t(tI));
+    const jhFlight = G * fltDur * fltDur / 8 * 100, vTO = vel[tI], jhImp = vTO * vTO / (2 * G) * 100;
+    const rsi = contraction > 0 ? jhImp / 100 / contraction : 0;
+    const e1 = Math.min(tI + 1, n), e2 = Math.min(zI + 1, n), e3 = Math.min(bI + 1, n);
+    const peakVprop = e1 > zI ? maxOf(vel, zI, e1) : 0;
+    let peakVneg = 0; if (e2 > sI) { peakVneg = Infinity; for (let i = sI; i < e2; i++) if (vel[i] < peakVneg) peakVneg = vel[i]; }
+    const uImp = trap(sf, sI, e3, dt), uImpL = trap(sl, sI, e3, dt), uImpR = trap(sr, sI, e3, dt);
+    const bF = sl_(sf, bI, e2), bFL = sl_(sl, bI, e2), bFR = sl_(sr, bI, e2), bP = bF.map((v, i) => v * vel[bI + i]);
+    const avgBP = mean(bP, 0, bP.length), bImp = trap(sf, bI, e2, dt), bImpL = trap(sl, bI, e2, dt), bImpR = trap(sr, bI, e2, dt);
+    const rfdB = bF.length > 1 ? (bF[bF.length - 1] - bF[0]) / (bF.length * dt) : 0, rfdBL = bFL.length > 1 ? (bFL[bFL.length - 1] - bFL[0]) / (bFL.length * dt) : 0, rfdBR = bFL.length > 1 ? (bFR[bFR.length - 1] - bFR[0]) / (bFL.length * dt) : 0;
+    const pF = sl_(sf, zI, e1), pFL = sl_(sl, zI, e1), pFR = sl_(sr, zI, e1), pP = pF.map((v, i) => v * vel[zI + i]);
+    const mx = a => a.length ? maxOf(a, 0, a.length) : 0, mn = a => mean(a, 0, a.length);
+    const pImp = trap(sf, zI, e1, dt), pImpL = trap(sl, zI, e1, dt), pImpR = trap(sr, zI, e1, dt);
+    const posImp = bImp + pImp, posImpL = bImpL + pImpL, posImpR = bImpR + pImpR;
+    const pkIdx = argmax(sf, sI, tI + 1), ttp = (t(pkIdx) - t(sI)) * 1000;
+    const i50 = Math.min(n, zI + Math.trunc(0.05 / dt)), i100 = Math.min(n, zI + Math.trunc(0.10 / dt));
+    const sub = (a, s, e, b) => { let r = 0; if (e > s) { const tmp = new Float64Array(e - s); for (let i = s; i < e; i++) tmp[i - s] = a[i] - b; r = trap(tmp, 0, tmp.length, dt); } return r; };
+    const p1 = sub(sf, zI, i50, bw), p1L = sub(sl, zI, i50, ref.l), p1R = sub(sr, zI, i50, ref.r);
+    const p2 = sub(sf, i50, i100, bw), p2L = sub(sl, i50, i100, ref.l), p2R = sub(sr, i50, i100, ref.r);
+    let lI0 = 0, lIL = 0, lIR = 0;
+    if (lI > tI && lI < n) { const le = Math.min(n, lI + Math.trunc(0.5 / dt)); lI0 = trap(sf, lI, le, dt); lIL = trap(sl, lI, le, dt); lIR = trap(sr, lI, le, dt); }
+    const comDepth = Math.abs(disp[zI] - disp[sI]) * 100, comTO = disp[tI] * 100, stiff = comDepth > 0 ? mx(bF) / (comDepth / 100) : 0, fjr = contraction > 0 ? fltDur / contraction : 0;
+    const tdDelay = (o.lIdxL != null && o.lIdxR != null) ? ((t(o.lIdxL) - t(o.lIdxR)) * 1000) : null;
+    const f0 = (v, d) => Number(v).toFixed(d), row = (name, l, r, tot, d) => ({ name, l, r, t: tot, d: (l === '-' || r === '-') ? '-' : deficit(parseFloat(l), parseFloat(r)) });
+    const dash = '-', LR = (a, b, d) => [f0(a, d), f0(b, d)];
+    const R = (name, l, r, tot, d) => ({ name, l: l === null ? dash : f0(l, d), r: r === null ? dash : f0(r, d), t: tot, d: (l === null || r === null) ? dash : deficit(l, r) });
+    const T = (v, d) => f0(v, d);
+    const groups = [
+      { title: '1. Weighing & Onset', rows: [
+        R('Body Mass (kg)', ref.l / G, ref.r / G, T(mass, 1), 1), R('Body Weight (N)', ref.l, ref.r, T(bw, 0), 0), R('Time to Peak Force (ms)', null, null, T(ttp, 0), 0)] },
+      { title: '2. Unweighting', rows: [
+        R('Unloading Duration (s)', null, null, T(unwDur, 3), 3), R('Unloading Impulse (N·s)', uImpL, uImpR, T(uImp, 0), 0), R('Peak Negative Velocity (m/s)', null, null, T(peakVneg, 2), 2)] },
+      { title: '3. Braking (Eccentric)', rows: [
+        R('Braking Duration (s)', null, null, T(brkDur, 3), 3), R('Peak Force (N)', mx(bFL), mx(bFR), T(mx(bF), 0), 0), R('Mean Force (N)', mn(bFL), mn(bFR), T(mn(bF), 0), 0),
+        R('Braking Impulse (N·s)', bImpL, bImpR, T(bImp, 0), 0), R('Eccentric Braking RFD (N/s)', rfdBL, rfdBR, T(rfdB, 0), 0), R('Mean Power (W)', null, null, T(Math.abs(avgBP), 0), 0)] },
+      { title: '4. Propulsive (Concentric)', rows: [
+        R('Propulsive Duration (s)', null, null, T(propDur, 3), 3), R('Peak Force (N)', mx(pFL), mx(pFR), T(mx(pF), 0), 0), R('Mean Force (N)', mn(pFL), mn(pFR), T(mn(pF), 0), 0),
+        R('Propulsive Impulse (N·s)', pImpL, pImpR, T(pImp, 0), 0), R('Peak Propulsive Power (W)', null, null, T(mx(pP), 0), 0), R('Mean Propulsive Power (W)', null, null, T(mn(pP), 0), 0),
+        R('P1 Concentric Impulse 0–50 ms (N·s)', p1L, p1R, T(p1, 1), 1), R('P2 Concentric Impulse 50–100 ms (N·s)', p2L, p2R, T(p2, 1), 1)] },
+      { title: '5. Flight & Performance', rows: [
+        R('Jump Height – Impulse-Momentum (cm)', null, null, T(jhImp, 1), 1), R('Jump Height – Flight Time (cm)', null, null, T(jhFlight, 1), 1), R('Flight Duration (s)', null, null, T(fltDur, 3), 3),
+        R('Take-off Velocity (m/s)', null, null, T(vTO, 2), 2), R('Peak Propulsive Velocity (m/s)', null, null, T(peakVprop, 2), 2), R('RSI Modified (AU)', null, null, T(rsi, 2), 2),
+        R('Positive Impulse (N·s)', posImpL, posImpR, T(posImp, 0), 0), R('COM Height at Take-off (cm)', null, null, T(comTO, 1), 1)] },
+      { title: '6. Landing & Strategy', rows: [
+        R('Landing Impulse (N·s)', lIL, lIR, T(lI0, 0), 0),
+        { name: 'Initial Touchdown Delay (L−R)', l: o.lIdxL ? f0(t(o.lIdxL), 3) + ' s' : dash, r: o.lIdxR ? f0(t(o.lIdxR), 3) + ' s' : dash, t: tdDelay === null ? dash : (tdDelay >= 0 ? '+' : '') + f0(tdDelay, 1) + ' ms', d: dash },
+        R('Countermovement COM Depth (cm)', null, null, T(comDepth, 1), 1), R('Leg Stiffness (N/m)', null, null, stiff > 0 ? T(stiff, 0) : 'N/A', 0), R('Flight-to-Jump Time Ratio (AU)', null, null, T(fjr, 2), 2)] }
+    ];
+    return { groups, sf, sl, sr, vel, bw, bwL: ref.l, bwR: ref.r, mass, jhImp, jhFlight, vTO, fltDur, num: { ttp, unwDur, brkDur, propDur, jhImp, jhFlight, vTO, rsi, comDepth, stiff, bImp, pImp, lI0, peakBF: mx(bF), peakPF: mx(pF), posImp, uImp, rfdB, avgBP, peakPP: mx(pP) } };
+  }
+  /* ---- impact frequency (impact_frequency.py) */
+  function fftReal(x, nfft) {
+    const re = new Float64Array(nfft), im = new Float64Array(nfft); re.set(x.subarray ? x : Float64Array.from(x));
+    for (let i = 1, j = 0; i < nfft; i++) { let bit = nfft >> 1; for (; j & bit; bit >>= 1) j ^= bit; j ^= bit; if (i < j) { [re[i], re[j]] = [re[j], re[i]]; } }
+    for (let len = 2; len <= nfft; len <<= 1) {
+      const ang = -2 * Math.PI / len, wr = Math.cos(ang), wi = Math.sin(ang);
+      for (let i = 0; i < nfft; i += len) { let cr = 1, ci = 0; for (let k = 0; k < len / 2; k++) { const a = i + k, b = i + k + len / 2, tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[b] * cr; re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti; const nr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = nr; } }
+    }
+    return { re, im };
+  }
+  function tukey(M, alpha) {
+    const w = new Float64Array(M), width = Math.floor(alpha * (M - 1) / 2);
+    for (let n = 0; n < M; n++) {
+      if (n <= width) w[n] = 0.5 * (1 + Math.cos(Math.PI * (-1 + 2 * n / alpha / (M - 1))));
+      else if (n < M - width - 1) w[n] = 1;
+      else w[n] = 0.5 * (1 + Math.cos(Math.PI * (-2 / alpha + 1 + 2 * n / alpha / (M - 1))));
+    }
+    return w;
+  }
+  function ampSpectrum(x, dt, nfft) {
+    const m = mean(x, 0, x.length), w = tukey(x.length, 0.2), y = new Float64Array(x.length);
+    for (let i = 0; i < x.length; i++) y[i] = (x[i] - m) * w[i];
+    const { re, im } = fftReal(y, nfft), nb = nfft / 2 + 1, f = new Float64Array(nb), a = new Float64Array(nb);
+    for (let k = 0; k < nb; k++) { f[k] = k / (nfft * dt); a[k] = Math.hypot(re[k], im[k]) * dt; }
+    return { f, a };
+  }
+  function uniform1d(x, size) {
+    const n = x.length, lo = Math.floor(size / 2), hi = size - 1 - lo, out = new Float64Array(n);
+    const at = i => { if (i < 0) i = -i - 1; if (i >= n) i = 2 * n - i - 1; return x[Math.min(Math.max(i, 0), n - 1)]; };
+    let s = 0; for (let k = -lo; k <= hi; k++) s += at(k);
+    for (let i = 0; i < n; i++) { out[i] = s / size; s += at(i + hi + 1) - at(i - lo); }
+    return out;
+  }
+  function crossTime(y, k, level, dt) { const y0 = y[k], y1 = y[k + 1], d = y1 !== y0 ? y1 - y0 : 1e-12; return (k + (level - y0) / d) * dt; }
+  function lastBelow(y, level, ipk) { let r = -1; for (let i = 0; i <= ipk; i++) if (y[i] < level) r = i; return r >= 0 && r < ipk ? r : null; }
+  function landingImpact(f, fs, tI, lI, o = {}) {
+    const pre = o.preMs ?? 40, post = o.postMs ?? 250, pk = o.peakMs ?? 100, snrK = o.snrK ?? 3, onsetFloor = o.onsetFloor ?? 10;
+    const n = f.length, dt = 1 / fs, out = { notes: [] };
+    const i0 = Math.max(0, lI - Math.trunc(pre * fs / 1000)), i1 = Math.min(n, lI + Math.trunc(post * fs / 1000));
+    if (i1 - i0 < 32) { out.notes.push('ช่วง landing สั้นเกินไปสำหรับ FFT'); return out; }
+    const fl0 = tI + Math.trunc(0.25 * (lI - tI)), fl1 = tI + Math.trunc(0.75 * (lI - tI));
+    const noise = (fl1 - fl0) >= 30 ? f.subarray(fl0, fl1) : null, sigma = noise ? std(f, fl0, fl1) : null;
+    if (!noise) out.notes.push('flight สั้นเกินไป ใช้ noise floor ไม่ได้ (ข้าม f_snr)');
+    const jEnd = Math.min(n, lI + Math.trunc(pk * fs / 1000)), iPk = argmax(f, i0, jEnd), peak = f[iPk];
+    const onsetLvl = sigma ? Math.max(onsetFloor, 5 * sigma) : onsetFloor;
+    const k10 = lastBelow(f, 0.10 * peak, iPk), k90 = lastBelow(f, 0.90 * peak, iPk), kOn = lastBelow(f, onsetLvl, iPk);
+    out.peak = peak; out.tPeakIdx = iPk;
+    if (k10 !== null && k90 !== null && kOn !== null) {
+      const t10 = crossTime(f, k10, 0.10 * peak, dt), t90 = crossTime(f, k90, 0.90 * peak, dt), tOn = crossTime(f, kOn, onsetLvl, dt), tr = t90 - t10, tp = iPk * dt - tOn;
+      out.tRiseMs = tr * 1000; out.tPeakMs = tp * 1000; out.fRise = tr > 0 ? 0.35 / tr : null; out.fDur = tp > 0 ? 1 / (4 * tp) : null;
+      if (tr < 5 * dt) out.notes.push(`t_rise ${(tr * 1000).toFixed(1)} ms < 5 sample (${(5 * dt * 1000).toFixed(0)} ms): f_rise เป็นค่าประมาณหยาบ`);
+    } else out.notes.push('หา onset/10%/90% ไม่ได้ (สัญญาณเริ่มสูงอยู่แล้ว หรือไม่มี impact ชัด)');
+    const seg = f.subarray(i0, i1), nfft = 1 << Math.ceil(Math.log2(seg.length * 4)), sp = ampSpectrum(seg, dt, nfft), df = sp.f[1] - sp.f[0];
+    let tot = 0; const cum = new Float64Array(sp.a.length); for (let i = 0; i < cum.length; i++) { tot += sp.a[i] ** 2; cum[i] = tot; }
+    let ic = 0; while (ic < cum.length && cum[ic] / tot < 0.99) ic++; out.fC99 = sp.f[Math.min(sp.f.length - 1, ic)];
+    out.freqs = sp.f; out.amp = sp.a;
+    if (noise) {
+      const ns = ampSpectrum(noise, dt, nfft), vals = []; for (let i = 0; i < sp.f.length; i++) if (sp.f[i] > 20) vals.push(ns.a[i]);
+      const floor = median(vals) * Math.sqrt(seg.length / noise.length), thr = snrK * floor, sm = uniform1d(sp.a, Math.max(1, Math.round(5 / df)));
+      let start = 0, bm = -Infinity; for (let i = 0; i < sm.length; i++) { const v = sp.f[i] >= 1 ? sm[i] : 0; if (v > bm) { bm = v; start = i; } }
+      let found = -1; for (let i = start; i < sm.length; i++) if (sm[i] < thr) { found = i; break; }
+      out.noiseThr = thr;
+      if (found >= 0) out.fSnr = sp.f[found]; else { out.fSnr = fs / 2; out.notes.push('spectrum ไม่ตกต่ำกว่า noise floor ก่อน Nyquist: f_snr = Nyquist (อาจมี aliasing/noise สูง)'); }
+    }
+    return out;
+  }
+  function plateCheck(f, fn, lowRatio = 10, flagRatio = 4.5) {
+    const r = f / fn; if (r >= 1) return { ratio: 1 / r, err: Infinity, status: 'Flag' };
+    const err = (1 / (1 - r * r) - 1) * 100, ratio = fn / f;
+    return { ratio, err, status: ratio >= lowRatio ? 'Low' : (ratio >= flagRatio ? 'Monitor' : 'Flag') };
+  }
+  function impactRows(channels, fs, tI, lI, fn) {
+    const rows = [], fm = (v, d = 1) => v == null ? '-' : Number(v).toFixed(d);
+    for (const [name, x] of Object.entries(channels)) {
+      const r = landingImpact(x, fs, tI, lI), cand = [r.fC99, r.fRise, r.fDur].filter(v => v), worst = cand.length ? Math.max(...cand) : null, chk = (fn && worst) ? plateCheck(worst, fn) : null;
+      rows.push({ channel: name, peak: fm(r.peak, 0), rise: fm(r.tRiseMs), fRise: fm(r.fRise), fDur: fm(r.fDur), fC99: fm(r.fC99), fUsed: fm(worst), ratio: chk ? fm(chk.ratio) : '-', err: chk ? (isFinite(chk.err) ? fm(chk.err, 2) : '>100') : '-', status: chk ? chk.status : 'fn not set', notes: r.notes, _worst: worst, _chk: chk });
+    }
+    return rows;
+  }
+  /* ---- orchestration for plates inside a C3D dataset */
+  function analyzePlates(ds, o = {}) {
+    const pls = ds.plates.filter(p => p.supported && p.fzFull);
+    if (!pls.length) return { ok: false, error: 'ไม่มี force plate ที่ใช้ได้ใน C3D นี้ (ต้องเป็น FP_TYPE 2/4 และมี analog)' };
+    const fs = ds.info.analogRate; if (!(fs > 0)) return { ok: false, error: 'ไม่พบ analog rate' };
+    const dt = 1 / fs;
+    let L = pls[0], Rr = null, lr = false;
+    if (pls.length >= 2) {
+      const iL = o.leftPlate != null ? pls.findIndex(p => p.index === o.leftPlate) : 0, iR = o.rightPlate != null ? pls.findIndex(p => p.index === o.rightPlate) : 1;
+      if (iL < 0 || iR < 0 || iL === iR) return { ok: false, error: 'เลือก plate ซ้าย/ขวาไม่ถูกต้อง (ต้องเป็นคนละแผ่น)' };
+      L = pls[iL]; Rr = pls[iR]; lr = true;
+    }
+    const n = L.fzFull.length, fl = Float64Array.from(L.fzFull), fr = lr ? Float64Array.from(Rr.fzFull) : new Float64Array(n), ft = fl.map((v, i) => v + fr[i]);
+    const g = G, ftype = o.filterType || 'butter', cutoff = o.cutoff || 50, warnings = [];
+    const auto = findQuietWindow(ft, fs);
+    let q0, q1, bwOverride = null, src;
+    if (o.bwMethod === 'mass' && o.mass > 0) { bwOverride = o.mass * g; q0 = auto.start ?? 0; q1 = auto.end ?? Math.min(n, Math.round(0.5 * fs)); src = 'น้ำหนักที่ระบุ ' + o.mass.toFixed(1) + ' kg'; }
+    else if (o.bwMethod === 'window' && o.window) { q0 = Math.round(o.window[0] * fs); q1 = Math.round(o.window[1] * fs) + 1; src = `window ${o.window[0].toFixed(2)}–${o.window[1].toFixed(2)} s`; }
+    else { q0 = auto.start ?? 0; q1 = auto.end ?? Math.min(n, Math.round(0.5 * fs)); src = auto.start != null ? `auto window ${(q0 * dt).toFixed(2)}–${((q1 - 1) * dt).toFixed(2)} s` : 'ไม่พบ window อัตโนมัติ (ใช้ 0.5 s แรก)'; if (!auto.ok) warnings.push('หา quiet-standing window อัตโนมัติไม่ผ่านเกณฑ์: ' + auto.warnings.join('; ')); }
+    q0 = Math.max(0, Math.min(q0, n - 1)); q1 = Math.max(q0 + 1, Math.min(q1, n));
+    const qm = mean(ft, q0, q1), qcv = qm > 0 ? std(ft, q0, q1) / qm * 100 : Infinity, bwRef = bwOverride || qm;
+    const block = [];
+    if (bwRef < 200) block.push(`BW ที่ใช้ = ${bwRef.toFixed(1)} N (< 200 N) ช่วงที่เลือกน่าจะไม่มีคนยืนบนแผ่น`);
+    if (!bwOverride && (q1 - q0) * dt < 0.25) block.push('ช่วง quiet window สั้นกว่า 0.25 s');
+    if (block.length) return { ok: false, error: 'หยุดการคำนวณเพื่อไม่ให้ได้ค่าที่ผิดปกติ: ' + block.join('; ') + ' · เลือกช่วงยืนนิ่งเอง หรือใส่น้ำหนักตัว', warnings, fs, dt, ft, fl, fr, lr, qWin: [q0, q1] };
+    if (!bwOverride && qcv > 3) warnings.push(`ช่วงที่เลือกยังไม่นิ่งมาก (CV ${qcv.toFixed(1)}% > 3%)`);
+    const quiet = [q0, q1];
+    const ph = detectPhases(ft, dt, { filterType: ftype, cutoff, slRaw: fl, srRaw: fr, quiet, bwOverride });
+    let P = { s: ph.s, b: ph.b, z: ph.z, t: ph.t, l: ph.l };
+    if (o.phaseTimes) { const pt = o.phaseTimes, c = v => Math.min(n - 1, Math.max(0, Math.round(v * fs))); P = { s: c(pt.s), b: c(pt.b), z: c(pt.z), t: c(pt.t), l: c(pt.l) }; }
+    const bad = !(P.s < P.b && P.b < P.z && P.z < P.t && P.t < P.l); if (bad) warnings.push('ลำดับเวลา phase ไม่เรียงจาก start < braking < split < take-off < landing');
+    const m = calcMetrics(ft, fl, fr, dt, P, { offL: ph.offL, offR: ph.offR, filterType: ftype, cutoff, quiet, bwOverride, lIdxL: lr ? ph.lL : null, lIdxR: lr ? ph.lR : null });
+    if (!lr) for (const gp of m.groups) for (const r of gp.rows) { r.l = '-'; r.r = '-'; r.d = '-'; }
+    const flz = fl.map(v => v - ph.offL), frz = fr.map(v => v - ph.offR), ftz = flz.map((v, i) => v + frz[i]);
+    let impact = [], impactErr = null;
+    try { const ch = lr ? { Left: flz, Right: frz, Total: ftz } : { Total: ftz }; impact = impactRows(ch, fs, P.t, P.l, o.fn > 0 ? o.fn : null); } catch (e) { impactErr = e.message; }
+    if (!(m.fltDur > 0.05)) warnings.push('ไม่พบ flight phase ที่ชัดเจน (ช่วงที่แรง < 25 N ยาว > 0.1 s หลัง 0.5 s แรก) · ข้อมูลนี้อาจไม่ใช่การกระโดด CMJ ค่า phase และ metric จึงอาจไม่มีความหมาย');
+    return { ok: true, fs, dt, n, lr, plates: lr ? [L.index, Rr.index] : [L.index], phases: P, auto: ph, quiet, bwSrc: src, bw: m.bw, mass: m.mass, groups: m.groups, traces: { sf: m.sf, sl: m.sl, sr: m.sr, vel: m.vel }, raw: { ft, fl, fr }, num: m.num, impact, impactErr, warnings, params: { filterType: ftype, cutoff } };
+  }
+  return { butter, filtfilt, butterLowpass, findQuietWindow, detectPhases, calcMetrics, landingImpact, impactRows, analyzePlates, G };
+})();
+
+const api = { FA, computeLowerBody, rigidFit, cardanZXY, rotZXY, LB_JOINTS, LB_DEFAULTS, readC3D, makeSyntheticCMJ, defaultLinks, splitLabel, sideOf, validRatio, MocapViewer, ChartView, AXIS, SIDE_COLOR, finishDataset };
+if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.MocapEngine = api;
+})(typeof window !== 'undefined' ? window : globalThis);
