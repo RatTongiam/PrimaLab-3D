@@ -80,7 +80,8 @@ function defaultLinks(base) {
   const pairs = [['LASI', 'RASI'], ['RASI', 'RPSI'], ['RPSI', 'LPSI'], ['LPSI', 'LASI']];
   for (const S of ['L', 'R']) {
     pairs.push([S + 'ASI', S + 'THI'], [S + 'THI', S + 'KNE'], [S + 'KNE', S + 'TIB'], [S + 'TIB', S + 'ANK'],
-      [S + 'ANK', S + 'HEE'], [S + 'ANK', S + 'TOE'], [S + 'HEE', S + 'TOE'],
+      [S + 'ANK', S + 'HEE'], [S + 'ANK', S + 'TOE'], [S + 'HEE', S + 'TOE'], [S + 'KNE', S + 'KNEM'], [S + 'ANK', S + 'ANKM'], [S + 'KNEM', S + 'ANKM'],
+      ...(('RTIB' in idx || 'LTIB' in idx) ? [] : [[S + 'KNE', S + 'ANK']]),
       [S + 'SHO', S + 'ELB'], [S + 'ELB', S + 'WRA'], [S + 'WRA', S + 'WRB'], [S + 'WRA', S + 'FIN'], [S + 'WRB', S + 'FIN'],
       ['C7', S + 'SHO']);
   }
@@ -987,7 +988,21 @@ function rotZXY(aDeg, bDeg, gDeg) {
 }
 
 const LB_MARKERS = ['LASI', 'RASI', 'LPSI', 'RPSI', 'LKNE', 'RKNE', 'LTHI', 'RTHI', 'LANK', 'RANK', 'LTIB', 'RTIB', 'LTOE', 'RTOE', 'LHEE', 'RHEE'];
-const LB_DEFAULTS = { kneeW: 0.10, ankleW: 0.07, markerR: 0.007, staticStart: 0, staticN: 10, normalize: false };
+const LB_DEFAULTS = { kneeW: 0.10, ankleW: 0.07, markerR: 0.007, staticStart: 0, staticN: 10, normalize: false, fitTol: 0.015 };
+/* Marker sets for the lower-body model.
+   conv16 : Conventional Lower 16 (tibia wand TIB, virtual medial points from caliper widths)
+   bad18  : 18 markers with real medial KNEM/ANKM, no TIB (e.g. badminton set). Joint centres = midpoint of lateral/medial,
+            segments are tracked with a robust rigid fit that drops one inconsistent marker (e.g. a mislabelled KNEM). */
+const LB_SETS = {
+  conv16: { label: 'Conventional Lower 16', markers: LB_MARKERS, medial: false },
+  bad18: { label: 'Lower 18 (KNEM/ANKM, no TIB)', medial: true,
+    markers: ['LASI', 'RASI', 'LPSI', 'RPSI', 'LKNE', 'RKNE', 'LKNEM', 'RKNEM', 'LTHI', 'RTHI', 'LANK', 'RANK', 'LANKM', 'RANKM', 'LTOE', 'RTOE', 'LHEE', 'RHEE'] }
+};
+function detectLBSet(ds) {
+  const have = new Set(ds.base.map(b => b.toUpperCase()));
+  for (const id of ['conv16', 'bad18']) if (LB_SETS[id].markers.every(n => have.has(n))) return id;
+  return null;
+}
 const LB_JOINTS = [['RHip', 'RTH', 'RPV'], ['RKnee', 'RSK', 'RTH'], ['RAnkle', 'RFT', 'RSK'], ['LHip', 'LTH', 'RPV'], ['LKnee', 'LSK', 'LTH'], ['LAnkle', 'LFT', 'LSK']];
 
 /* ---------------------------------------------------------------- Anthropometry estimation
@@ -1048,20 +1063,31 @@ function estimateAnthropometry(heightM, massKg, sex) {
 function computeLowerBody(ds, params) {
   const p = Object.assign({}, LB_DEFAULTS, params || {});
   const kw = s => (p.kneeW && typeof p.kneeW === 'object') ? p.kneeW[s] : p.kneeW, aw = s => (p.ankleW && typeof p.ankleW === 'object') ? p.ankleW[s] : p.ankleW;
-  const idx = {}, missing = [];
-  for (const n of LB_MARKERS) { const i = ds.base.findIndex(b => b.toUpperCase() === n); if (i < 0) missing.push(n); idx[n] = i; }
-  if (missing.length) return { ok: false, error: 'ไม่พบ marker: ' + missing.join(', ') };
+  const sds = p.staticDs || ds;               // separate static trial (optional); markers matched by name
+  const setId = (p.markerSet && LB_SETS[p.markerSet]) ? p.markerSet : detectLBSet(ds);
+  if (!setId) {
+    const have = new Set(ds.base.map(b => b.toUpperCase()));
+    return { ok: false, error: 'ไม่พบ marker: ' + LB_MARKERS.filter(n => !have.has(n)).join(', ') + ' · (รองรับชุด Conventional Lower 16 หรือชุด 18 ตัวที่มี KNEM/ANKM ไม่มี TIB)' };
+  }
+  const MK = LB_SETS[setId].markers, REAL_MEDIAL = LB_SETS[setId].medial, ROBUST = setId === 'bad18';
+  const mkIdx = d => { const o = {}, miss = []; for (const n of MK) { const i = d.base.findIndex(b => b.toUpperCase() === n); if (i < 0) miss.push(n); o[n] = i; } return { o, miss }; };
+  const di = mkIdx(ds), si = mkIdx(sds), idx = di.o, sidx = si.o;
+  if (di.miss.length) return { ok: false, error: 'ไม่พบ marker: ' + di.miss.join(', ') };
+  if (si.miss.length) return { ok: false, error: 'ไฟล์ static ไม่พบ marker: ' + si.miss.join(', ') };
   const nF = ds.nFrames, nM = ds.nM, warnings = [];
+  const sameStatic = sds === ds;
+  if (!sameStatic && Math.abs(sds.rate - ds.rate) > 1e-6) warnings.push('อัตราสุ่มตัวอย่างของ static (' + sds.rate + ' Hz) ต่างจาก dynamic (' + ds.rate + ' Hz) (ไม่กระทบการคำนวณมุม)');
   const at = (n, f) => { const k = f * nM + idx[n]; return ds.vis[k] ? [ds.pts[k * 3], ds.pts[k * 3 + 1], ds.pts[k * 3 + 2]] : null; };
+  const atS = (n, f) => { const k = f * sds.nM + sidx[n]; return sds.vis[k] ? [sds.pts[k * 3], sds.pts[k * 3 + 1], sds.pts[k * 3 + 2]] : null; };
   /* static mean + stability */
-  const s0 = clamp(p.staticStart | 0, 0, nF - 1), s1 = Math.min(nF, s0 + Math.max(1, p.staticN | 0));
+  const s0 = clamp(p.staticStart | 0, 0, sds.nFrames - 1), s1 = Math.min(sds.nFrames, s0 + Math.max(1, p.staticN | 0));
   const S = {}, staticMove = {};
-  for (const n of LB_MARKERS) {
+  for (const n of MK) {
     const sum = [0, 0, 0]; let c = 0;
-    for (let f = s0; f < s1; f++) { const q = at(n, f); if (q) { sum[0] += q[0]; sum[1] += q[1]; sum[2] += q[2]; c++; } }
+    for (let f = s0; f < s1; f++) { const q = atS(n, f); if (q) { sum[0] += q[0]; sum[1] += q[1]; sum[2] += q[2]; c++; } }
     if (!c) return { ok: false, error: 'marker ' + n + ' ไม่มีข้อมูลในช่วง static' };
     S[n] = [sum[0] / c, sum[1] / c, sum[2] / c];
-    let mx = 0; for (let f = s0; f < s1; f++) { const q = at(n, f); if (q) mx = Math.max(mx, Math.hypot(q[0] - S[n][0], q[1] - S[n][1], q[2] - S[n][2])); }
+    let mx = 0; for (let f = s0; f < s1; f++) { const q = atS(n, f); if (q) mx = Math.max(mx, Math.hypot(q[0] - S[n][0], q[1] - S[n][1], q[2] - S[n][2])); }
     staticMove[n] = mx;
   }
   const maxMove = Math.max(...Object.values(staticMove));
@@ -1072,8 +1098,19 @@ function computeLowerBody(ds, params) {
   const L = {};
   L.RHJC = V.add(am, V.add(V.mul(ML, 0.36 * D), V.add(V.mul(AP, -0.19 * D), V.mul(AX, -0.30 * D))));
   L.LHJC = V.add(am, V.add(V.mul(ML, -0.36 * D), V.add(V.mul(AP, -0.19 * D), V.mul(AX, -0.30 * D))));
-  L.RKNM = V.add(S.RKNE, V.mul(ML, -(kw('R') + 2 * p.markerR))); L.LKNM = V.add(S.LKNE, V.mul(ML, (kw('L') + 2 * p.markerR)));
-  L.RANM = V.add(S.RANK, V.mul(ML, -(aw('R') + 2 * p.markerR))); L.LANM = V.add(S.LANK, V.mul(ML, (aw('L') + 2 * p.markerR)));
+  let measured = null;
+  if (REAL_MEDIAL) {   // real medial markers: joint centre = midpoint lateral/medial marker
+    L.RKNM = S.RKNEM; L.LKNM = S.LKNEM; L.RANM = S.RANKM; L.LANM = S.LANKM;
+    const gap = (a, b) => Math.hypot(...V.sub(S[a], S[b])) - 2 * p.markerR;
+    measured = { kneeW: { R: gap('RKNE', 'RKNEM'), L: gap('LKNE', 'LKNEM') }, ankleW: { R: gap('RANK', 'RANKM'), L: gap('LANK', 'LANKM') } };
+    for (const s of ['R', 'L']) {   // medial marker must lie on the medial side of the lateral one
+      if (V.dot(V.sub(S[s + 'KNE'], S[s + 'KNEM']), ML) * (s === 'R' ? 1 : -1) <= 0) warnings.push(s + 'KNEM ไม่อยู่ด้านใน (medial) ของ ' + s + 'KNE ในช่วง static ตรวจ label');
+      if (V.dot(V.sub(S[s + 'ANK'], S[s + 'ANKM']), ML) * (s === 'R' ? 1 : -1) <= 0) warnings.push(s + 'ANKM ไม่อยู่ด้านใน (medial) ของ ' + s + 'ANK ในช่วง static ตรวจ label');
+    }
+  } else {
+    L.RKNM = V.add(S.RKNE, V.mul(ML, -(kw('R') + 2 * p.markerR))); L.LKNM = V.add(S.LKNE, V.mul(ML, (kw('L') + 2 * p.markerR)));
+    L.RANM = V.add(S.RANK, V.mul(ML, -(aw('R') + 2 * p.markerR))); L.LANM = V.add(S.LANK, V.mul(ML, (aw('L') + 2 * p.markerR)));
+  }
   L.RKJC = V.mid(S.RKNE, L.RKNM); L.LKJC = V.mid(S.LKNE, L.LKNM); L.RAJC = V.mid(S.RANK, L.RANM); L.LAJC = V.mid(S.LANK, L.LANM);
   /* segment definitions: tracking set (markers or landmarks), static anatomical frame */
   const frameFrom = (prox, dist, zRef) => {
@@ -1084,8 +1121,8 @@ function computeLowerBody(ds, params) {
   for (const s of ['R', 'L']) {
     const rs = s === 'R' ? 1 : -1;
     SEG[s + 'TH'] = { track: [s + 'HJC', s + 'KNE', s + 'THI'], frame: frameFrom(L[s + 'HJC'], L[s + 'KJC'], V.mul(V.sub(S[s + 'KNE'], L[s + 'KNM']), rs)) };
-    SEG[s + 'SK'] = { track: [s + 'TIB', s + 'ANK', s + 'KNE'], frame: frameFrom(L[s + 'KJC'], L[s + 'AJC'], V.mul(V.sub(S[s + 'ANK'], L[s + 'ANM']), rs)) };
-    SEG[s + 'FT'] = { track: [s + 'HEE', s + 'TOE', s + 'ANK'], frame: frameFrom(L[s + 'AJC'], S[s + 'TOE'], V.mul(V.sub(S[s + 'ANK'], L[s + 'AJC']), rs)) };
+    SEG[s + 'SK'] = { track: REAL_MEDIAL ? [s + 'KNE', s + 'KNEM', s + 'ANK', s + 'ANKM'] : [s + 'TIB', s + 'ANK', s + 'KNE'], frame: frameFrom(L[s + 'KJC'], L[s + 'AJC'], V.mul(V.sub(S[s + 'ANK'], L[s + 'ANM']), rs)) };
+    SEG[s + 'FT'] = { track: REAL_MEDIAL ? [s + 'HEE', s + 'TOE', s + 'ANK', s + 'ANKM'] : [s + 'HEE', s + 'TOE', s + 'ANK'], frame: frameFrom(L[s + 'AJC'], S[s + 'TOE'], V.mul(V.sub(S[s + 'ANK'], L[s + 'AJC']), rs)) };
   }
   // names: thigh/shank/foot tracking uses SEG keys RTH,RSK,RFT / LTH,LSK,LFT; fix keys
   const fix = { RTH: 'RTH', RSK: 'RSK', RFT: 'RFT', LTH: 'LTH', LSK: 'LSK', LFT: 'LFT', RPV: 'RPV' };
@@ -1100,13 +1137,25 @@ function computeLowerBody(ds, params) {
   for (const k of segNames) out.frames[k] = new Float32Array(nF * 12).fill(NaN);
   for (const j of ['RHJC', 'LHJC', 'RKJC', 'LKJC', 'RAJC', 'LAJC']) out.jc[j] = new Float32Array(nF * 3).fill(NaN);
   const pose = {}; let skipped = 0;
+  const fitStats = {}; for (const k of segNames) fitStats[k] = { sum: 0, n: 0, max: 0, short: 0, dropped: {} };
   for (let f = 0; f < nF; f++) {
     const cur = {}; let allOK = true;
-    for (const n of LB_MARKERS) { cur[n] = at(n, f); }
+    for (const n of MK) { cur[n] = at(n, f); }
     pose.RPV = null;
     const fitSeg = (k, getter) => {
-      const B = []; for (const n of SEG[k].track) { const q = getter(n); if (!q) return null; B.push(q); }
-      return rigidFit(SEG[k].A, B);
+      const nm = [], Ai = [], B = [];
+      SEG[k].track.forEach((n, i) => { const q = getter(n); if (q) { nm.push(n); Ai.push(SEG[k].A[i]); B.push(q); } });
+      if (!ROBUST) { if (nm.length < SEG[k].track.length) return null; return rigidFit(SEG[k].A, B); }
+      if (nm.length < 3) { fitStats[k].short++; return null; }
+      const run = (a, b) => { const T = rigidFit(a, b); let ss = 0; for (let i = 0; i < a.length; i++) { const r = V.add(M3.vec(T.R, a[i]), T.t), d = V.sub(r, b[i]); ss += d[0] * d[0] + d[1] * d[1] + d[2] * d[2]; } return { T, rms: Math.sqrt(ss / a.length) }; };
+      let best = run(Ai, B);
+      if (nm.length >= 4 && best.rms > p.fitTol) {   // leave-one-out: drop the marker whose removal fits best
+        let alt = null, drop = -1;
+        for (let j = 0; j < nm.length; j++) { const r = run(Ai.filter((_, i) => i !== j), B.filter((_, i) => i !== j)); if (!alt || r.rms < alt.rms) { alt = r; drop = j; } }
+        if (alt.rms < best.rms * 0.6) { best = alt; fitStats[k].dropped[nm[drop]] = (fitStats[k].dropped[nm[drop]] || 0) + 1; }
+      }
+      fitStats[k].sum += best.rms; fitStats[k].n++; if (best.rms > fitStats[k].max) fitStats[k].max = best.rms;
+      return best.T;
     };
     const T = {};
     T.RPV = fitSeg('RPV', n => cur[n]);
@@ -1146,12 +1195,18 @@ function computeLowerBody(ds, params) {
     for (const c of ['a', 'g']) { let prev = NaN, off = 0; const arr = A[c];
       for (let f = 0; f < nF; f++) { let v = arr[f]; if (v !== v) continue; if (prev === prev) { const d = v + off - prev; if (d > 180) off -= 360 * Math.round(d / 360); else if (d < -180) off -= 360 * Math.round(d / 360); } v += off; arr[f] = v; prev = v; } }
     let mxb = 0; for (let f = 0; f < nF; f++) { const v = Math.abs(A.b[f]); if (v === v && v > mxb) mxb = v; } gimbal[jn] = mxb;
-    if (p.normalize) for (const c of ['a', 'b', 'g']) { let s = 0, n = 0; for (let f = s0; f < s1; f++) { const v = A[c][f]; if (v === v) { s += v; n++; } } const m = n ? s / n : 0; for (let f = 0; f < nF; f++) A[c][f] -= m; }
+    if (p.normalize && sameStatic) for (const c of ['a', 'b', 'g']) { let s = 0, n = 0; for (let f = s0; f < s1; f++) { const v = A[c][f]; if (v === v) { s += v; n++; } } const m = n ? s / n : 0; for (let f = 0; f < nF; f++) A[c][f] -= m; }
+  }
+  if (ROBUST) for (const k of segNames) {
+    const st = fitStats[k], dr = Object.entries(st.dropped);
+    for (const [m, c] of dr) warnings.push(k + ': ตัด ' + m + ' ออกจากการ fit ' + c + ' frame (ระยะไม่คงที่ > ' + (p.fitTol * 1000).toFixed(0) + ' mm จาก static) · ตรวจ label/ตำแหน่ง marker');
+    if (st.short) warnings.push(k + ': marker ไม่พอ (<3) ' + st.short + ' frame ไม่มีค่ามุม');
   }
   for (const jn in gimbal) if (gimbal[jn] > 75) warnings.push(jn + ': มุมแกนกลาง (ab/adduction) สูงสุด ' + gimbal[jn].toFixed(0) + '° ใกล้ gimbal lock ค่ามุมสามแกนอาจไม่น่าเชื่อถือ');
   const ranges = {};
   for (const jn in out.angles) { ranges[jn] = {}; for (const c of ['a', 'b', 'g']) { let lo = Infinity, hi = -Infinity; for (let f = 0; f < nF; f++) { const v = out.angles[jn][c][f]; if (v === v) { if (v < lo) lo = v; if (v > hi) hi = v; } } ranges[jn][c] = [lo, hi]; } }
-  return { ok: true, params: p, anthro: p.anthro || null, warnings, angles: out.angles, frames: out.frames, jc: out.jc, ranges, upTilt, staticMove: maxMove, landmarks: L, staticRange: [s0, s1 - 1], asisDistance: D, segNames };
+  const fitSummary = {}; for (const k of segNames) { const st = fitStats[k]; fitSummary[k] = { meanRms: st.n ? st.sum / st.n : NaN, maxRms: st.max, dropped: st.dropped, short: st.short }; }
+  return { ok: true, markerSet: setId, markerSetLabel: LB_SETS[setId].label, staticSource: sameStatic ? 'trial' : (sds.name || 'static file'), measured, fitSummary, params: Object.assign({}, p, { staticDs: undefined }), anthro: p.anthro || null, warnings, angles: out.angles, frames: out.frames, jc: out.jc, ranges, upTilt, staticMove: maxMove, landmarks: L, staticRange: [s0, s1 - 1], asisDistance: D, segNames };
 }
 
 /* ---------------------------------------------------------------- Force-analysis engine
@@ -1499,6 +1554,6 @@ const FA = (() => {
   return { butter, filtfilt, butterLowpass, findQuietWindow, detectPhases, calcMetrics, landingImpact, impactRows, analyzePlates, G };
 })();
 
-const api = { FA, computeLowerBody, estimateAnthropometry, rigidFit, cardanZXY, rotZXY, LB_JOINTS, LB_DEFAULTS, readC3D, makeSyntheticCMJ, defaultLinks, splitLabel, sideOf, validRatio, MocapViewer, ChartView, AXIS, SIDE_COLOR, finishDataset };
+const api = { FA, computeLowerBody, detectLBSet, LB_SETS, estimateAnthropometry, rigidFit, cardanZXY, rotZXY, LB_JOINTS, LB_DEFAULTS, readC3D, makeSyntheticCMJ, defaultLinks, splitLabel, sideOf, validRatio, MocapViewer, ChartView, AXIS, SIDE_COLOR, finishDataset };
 if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.MocapEngine = api;
 })(typeof window !== 'undefined' ? window : globalThis);

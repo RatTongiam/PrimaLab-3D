@@ -22,6 +22,7 @@ const I18N_FRAG = [
   ['ประมาณการและนำไปใช้', 'Estimate & Apply'], ['ส่วนสูง (cm)', 'Height (cm)'], ['น้ำหนัก (kg)', 'Weight (kg)'],
   ['* ค่า width เป็นเพียงค่าประมาณการเบื้องต้น แนะนำให้ใช้คาลิปเปอร์วัดจริง', '* Knee/ankle widths are rough initial estimates. Direct measurement is strongly recommended.'],
   ['มุมข้อต่อ (แบบ V3D)', 'Joint angles (V3D-style)'], ['คำนวณมุมข้อต่อ', 'Compute joint angles'], ['มุมข้อต่อ', 'Joint angles'], ['ส่งออก CSV', 'Export CSV'],
+  ['โหลดไฟล์ static แยก', 'Load separate static file'], ['ใช้ trial นี้เป็น static', 'Use this trial as static'], ['Static: ใช้ frame ต้นของ trial ที่เปิดอยู่', 'Static: uses the first frames of the open trial'],
   ['ลบค่าเฉลี่ยช่วง static (zero offset)', 'Subtract static-period mean (zero offset)'], ['จำนวน frame', 'No. of frames'], ['Static: frame เริ่ม', 'Static: start frame'],
   ['ค่า width เป็น placeholder ต้องวัดจริง', 'width values are placeholders — measure real ones'], ['ยังไม่เทียบกับ Visual3D', 'not yet compared with Visual3D'],
   ['ค้นหาชื่อ', 'Search name'], ['ค้นหา marker', 'Search markers'], ['คีย์ลัด', 'Shortcuts'], ['ยกเลิกโหมด link', 'cancel link mode'], ['±1 เฟรม', '±1 frame'], ['±10', '±10'],

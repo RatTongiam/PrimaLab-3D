@@ -368,6 +368,12 @@ kbd { font: 500 11px var(--mono); padding: 1px 5px; border: 1px solid var(--line
           <label class="wide"><input id="aNorm" type="checkbox"> ลบค่าเฉลี่ยช่วง static (zero offset)</label>
         </div>
         <div class="card-acts">
+          <button id="bStatic" class="btn" type="button">โหลดไฟล์ static แยก</button>
+          <button id="bStaticClr" class="btn" type="button" disabled>ใช้ trial นี้เป็น static</button>
+        </div>
+        <input id="fileStatic" type="file" accept=".c3d" hidden>
+        <p class="note" id="staticNote">Static: ใช้ frame ต้นของ trial ที่เปิดอยู่</p>
+        <div class="card-acts">
           <button id="bAng" class="btn primary" type="button">คำนวณมุมข้อต่อ</button>
           <button id="bCsv" class="btn" type="button" disabled>ส่งออก CSV</button>
         </div>

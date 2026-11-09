@@ -7,7 +7,7 @@ const chart = new E.ChartView($('chart')), chart2 = new E.ChartView($('chart2'))
 const chartF = new E.ChartView($('cmjF')), chartV = new E.ChartView($('cmjV'));
 chartF.noEventLabels = chartV.noEventLabels = true;
 let cmj = null;
-let ds = null, tab = 'marker', kin = null, fa = null, chartK = 1;
+let ds = null, tab = 'marker', kin = null, fa = null, chartK = 1, staticDs = null;
 const cache = new Map();
 
 /* ---------- theme tokens for the chart canvas */
@@ -282,15 +282,17 @@ function runAngles() {
     ankleW: { R: num('aAR'), L: num('aAL') },
     markerR: num('aMR'),
     normalize: $('aNorm').checked,
+    staticDs,
     anthro
   };
   const r = E.computeLowerBody(ds, p), n = $('angNote');
   if (!r.ok) { kin = null; viewer.kin = null; $('tabA').disabled = true; $('tabA2').disabled = true; $('bCsv').disabled = true; n.className = 'note err'; n.textContent = r.error; viewer.invalidate(); return; }
   kin = r; viewer.kin = r; viewer.invalidate();
+  if (r.measured) { const m = r.measured, fx = (id, v) => { if ($(id) && v === v) $(id).value = v.toFixed(3); }; fx('aKR', m.kneeW.R); fx('aKL', m.kneeW.L); fx('aAR', m.ankleW.R); fx('aAL', m.ankleW.L); }
   $('tabA').disabled = false; $('tabA2').disabled = false; $('bCsv').disabled = false;
   const fmt = j => { const g = r.ranges[j].a; return j + ' ' + g[0].toFixed(0) + '…' + g[1].toFixed(0) + '°'; };
   n.className = 'note' + (r.warnings.length ? ' warn' : '');
-  n.textContent = 'static f' + r.staticRange[0] + '–' + r.staticRange[1] + ' (marker ขยับสูงสุด ' + (r.staticMove * 1000).toFixed(1) + ' mm) · flex: ' + ['RHip', 'RKnee', 'RAnkle', 'LHip', 'LKnee', 'LAnkle'].map(fmt).join(' · ') + (r.warnings.length ? ' · ⚠ ' + r.warnings.join(' · ') : '') + ' · ยังไม่เทียบกับ Visual3D';
+  n.textContent = 'ชุด marker: ' + r.markerSetLabel + (r.measured ? ' (width วัดจาก marker medial ในไฟล์ ช่อง width ไม่ถูกใช้)' : '') + ' · static: ' + (r.staticSource === 'trial' ? 'trial นี้' : r.staticSource) + ' f' + r.staticRange[0] + '–' + r.staticRange[1] + ' (marker ขยับสูงสุด ' + (r.staticMove * 1000).toFixed(1) + ' mm) · flex: ' + ['RHip', 'RKnee', 'RAnkle', 'LHip', 'LKnee', 'LAnkle'].map(fmt).join(' · ') + (r.warnings.length ? ' · ⚠ ' + r.warnings.join(' · ') : '') + ' · ยังไม่เทียบกับ Visual3D';
   setTab('ang');
 }
 if ($('bApplyAnthro')) $('bApplyAnthro').addEventListener('click', () => updateAnthroUI(true));
@@ -299,6 +301,23 @@ if ($('bApplyAnthro')) $('bApplyAnthro').addEventListener('click', () => updateA
   if (el) el.addEventListener('input', () => updateAnthroUI(false));
 });
 $('bAng').addEventListener('click', runAngles);
+/* separate static trial (markers matched by name) */
+function setStatic(d) {
+  staticDs = d;
+  $('bStaticClr').disabled = !d;
+  const sn = $('staticNote');
+  if (d) {
+    $('aS0').value = 0; $('aSN').value = Math.min(60, d.nFrames);
+    sn.className = 'note'; sn.textContent = 'Static: ' + d.name + ' · ' + d.nFrames + ' frames @ ' + d.rate + ' Hz · ใช้ ' + $('aSN').value + ' frame แรกเฉลี่ยเป็นท่า static';
+  } else { sn.className = 'note'; sn.textContent = 'Static: ใช้ frame ต้นของ trial ที่เปิดอยู่'; }
+  if (ds && kin) runAngles();
+}
+$('bStatic').addEventListener('click', () => $('fileStatic').click());
+$('fileStatic').addEventListener('change', async e => {
+  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  try { setStatic(E.readC3D(await f.arrayBuffer(), f.name)); } catch (err) { const sn = $('staticNote'); sn.className = 'note err'; sn.textContent = 'เปิดไฟล์ static ไม่ได้: ' + err.message; }
+});
+$('bStaticClr').addEventListener('click', () => setStatic(null));
 $('bSide').addEventListener('click', () => { const on = document.querySelector('.app').classList.toggle('nosideb'); $('bSide').setAttribute('aria-pressed', on); $('bSide').textContent = on ? '◨ เมนู' : '◧ เมนู'; viewer.invalidate(); });
 $('oBody').addEventListener('input', e => { viewer.opt.body = e.target.checked; viewer.invalidate(); });
 $('oSegs').addEventListener('input', e => { viewer.opt.segs = e.target.checked; viewer.invalidate(); });
