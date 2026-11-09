@@ -371,6 +371,7 @@ kbd { font: 500 11px var(--mono); padding: 1px 5px; border: 1px solid var(--line
           <label>Ankle width R (m) <input id="aAR" type="number" step="0.001" value="0.070"></label>
           <label>Ankle width L (m) <input id="aAL" type="number" step="0.001" value="0.070"></label>
           <label>Marker radius (m) <input id="aMR" type="number" step="0.001" value="0.007"></label>
+          <label class="wide">Convention <select id="aConv"><option value="v3d">V3D · Cardan Z-X-Y</option><option value="pig">Plug-in Gait style · Y-X-Z (ชุด 18 marker)</option></select></label>
           <label class="wide"><input id="aNorm" type="checkbox"> ลบค่าเฉลี่ยช่วง static (zero offset)</label>
         </div>
         <div class="card-acts">
@@ -1386,6 +1387,15 @@ function rigidFit(A, B) {
 function cardanZXY(R) {
   return [Math.atan2(-R[1], R[4]) / D2R, Math.asin(clamp(R[7], -1, 1)) / D2R, Math.atan2(-R[6], R[8]) / D2R];
 }
+/* R = Ry(a) Rx(b) Rz(g)  ->  degrees  (Plug-in Gait style: a about lateral Y, b about anterior X, g about vertical Z) */
+function cardanYXZ(R) {
+  return [Math.atan2(R[2], R[8]) / D2R, Math.asin(clamp(-R[5], -1, 1)) / D2R, Math.atan2(R[3], R[4]) / D2R];
+}
+function rotYXZ(aDeg, bDeg, gDeg) {
+  const a = aDeg * D2R, b = bDeg * D2R, g = gDeg * D2R, Ry = [Math.cos(a), 0, Math.sin(a), 0, 1, 0, -Math.sin(a), 0, Math.cos(a)],
+    Rx = [1, 0, 0, 0, Math.cos(b), -Math.sin(b), 0, Math.sin(b), Math.cos(b)], Rz = [Math.cos(g), -Math.sin(g), 0, Math.sin(g), Math.cos(g), 0, 0, 0, 1];
+  return M3.mul(M3.mul(Ry, Rx), Rz);
+}
 function rotZXY(aDeg, bDeg, gDeg) {
   const a = aDeg * D2R, b = bDeg * D2R, g = gDeg * D2R, Rz = [Math.cos(a), -Math.sin(a), 0, Math.sin(a), Math.cos(a), 0, 0, 0, 1],
     Rx = [1, 0, 0, 0, Math.cos(b), -Math.sin(b), 0, Math.sin(b), Math.cos(b)], Ry = [Math.cos(g), 0, Math.sin(g), 0, 1, 0, -Math.sin(g), 0, Math.cos(g)];
@@ -1393,7 +1403,7 @@ function rotZXY(aDeg, bDeg, gDeg) {
 }
 
 const LB_MARKERS = ['LASI', 'RASI', 'LPSI', 'RPSI', 'LKNE', 'RKNE', 'LTHI', 'RTHI', 'LANK', 'RANK', 'LTIB', 'RTIB', 'LTOE', 'RTOE', 'LHEE', 'RHEE'];
-const LB_DEFAULTS = { kneeW: 0.10, ankleW: 0.07, markerR: 0.007, staticStart: 0, staticN: 10, normalize: false, fitTol: 0.015 };
+const LB_DEFAULTS = { kneeW: 0.10, ankleW: 0.07, markerR: 0.007, staticStart: 0, staticN: 10, normalize: false, fitTol: 0.015, convention: 'v3d' };
 /* Marker sets for the lower-body model.
    conv16 : Conventional Lower 16 (tibia wand TIB, virtual medial points from caliper widths)
    bad18  : 18 markers with real medial KNEM/ANKM, no TIB (e.g. badminton set). Joint centres = midpoint of lateral/medial,
@@ -1532,6 +1542,29 @@ function computeLowerBody(ds, params) {
   // names: thigh/shank/foot tracking uses SEG keys RTH,RSK,RFT / LTH,LSK,LFT; fix keys
   const fix = { RTH: 'RTH', RSK: 'RSK', RFT: 'RFT', LTH: 'LTH', LSK: 'LSK', LFT: 'LFT', RPV: 'RPV' };
   const segNames = Object.keys(fix);
+ /* ---- Plug-in Gait style convention (bad18 only): segment axes X anterior, Y left, Z proximal(up); angles Euler Y-X-Z.
+        Shank has no TIB marker: a virtual TIB (midpoint of lateral KNE-ANK in static) fixes the shank frontal plane, as the real TIB does in PiG.
+        The virtual TIB is not an independent measurement; shank pose comes from the robust fit of KNE/KNEM/ANK/ANKM. */
+  const PIG = p.convention === 'pig';
+  if (PIG && !REAL_MEDIAL) return { ok: false, error: 'โหมด Plug-in Gait style ใช้ได้กับชุด 18 marker (KNEM/ANKM) เท่านั้น' };
+  let pigOffset = null;
+  if (PIG) {
+    const orth = (v, z) => V.norm(V.sub(v, V.mul(z, V.dot(v, z))));
+    const mk = (o, z, leftRef) => { const Y = orth(leftRef, z); return { o, R: M3.cols(V.cross(Y, z), Y, z) }; };
+    const Ypel = V.norm(V.sub(S.LASI, S.RASI)), Xpel = V.norm(V.sub(apRaw, V.mul(Ypel, V.dot(apRaw, Ypel))));
+    SEG.RPV.frame = { o: V.mid(L.RHJC, L.LHJC), R: M3.cols(Xpel, Ypel, V.cross(Xpel, Ypel)) };
+    L.RTIBv = V.mid(S.RKNE, S.RANK); L.LTIBv = V.mid(S.LKNE, S.LANK);
+    for (const s of ['R', 'L']) {
+      const R_ = s === 'R', lat = (a, b) => V.sub(R_ ? S[b] : S[a], R_ ? S[a] : S[b]);   // pointing to subject's left
+      SEG[s + 'TH'].frame = mk(L[s + 'HJC'], V.norm(V.sub(L[s + 'HJC'], L[s + 'KJC'])), lat(s + 'KNE', s + 'KNEM'));
+      const l = V.sub(L[s + 'TIBv'], V.mid(L[s + 'KJC'], L[s + 'AJC']));
+      SEG[s + 'SK'].frame = mk(L[s + 'KJC'], V.norm(V.sub(L[s + 'KJC'], L[s + 'AJC'])), R_ ? V.mul(l, -1) : l);
+      SEG[s + 'FT'].frame = mk(L[s + 'AJC'], V.norm(V.sub(L[s + 'AJC'], S[s + 'TOE'])), lat(s + 'ANK', s + 'ANKM'));
+    }
+    // static plantar/dorsiflexion offset of the foot (as PiG's static calibration): foot-vs-shank angle in the static pose
+    pigOffset = {};
+    for (const s of ['R', 'L']) pigOffset[s] = cardanYXZ(M3.mul(M3.T(SEG[s + 'SK'].frame.R), SEG[s + 'FT'].frame.R))[0];
+  }
   const stat = n => (n in S ? S[n] : L[n]);
   for (const k of segNames) SEG[k].A = SEG[k].track.map(stat);
   /* static frame sanity: Y axis vs lab up */
@@ -1589,7 +1622,15 @@ function computeLowerBody(ds, params) {
     for (const [jn, sg, rf] of LB_JOINTS) {
       if (!out.angles[jn]) out.angles[jn] = { a: new Float32Array(nF).fill(NaN), b: new Float32Array(nF).fill(NaN), g: new Float32Array(nF).fill(NaN) };
       if (!RA[sg] || !RA[rf]) { if (jn === 'RHip') skipped++; continue; }
-      const e = cardanZXY(M3.mul(M3.T(RA[rf]), RA[sg]));
+      let e;
+      if (PIG) {
+        e = cardanYXZ(M3.mul(M3.T(RA[rf]), RA[sg]));
+        const left = jn[0] === 'L', t = jn.slice(1), sd = left ? -1 : 1;
+        // output: a = flexion(+) / dorsiflexion(+), b = adduction(+) / varus(+), g = internal rotation(+)
+        if (t === 'Hip') e = [-e[0], sd * e[1], sd * e[2]];
+        else if (t === 'Knee') e = [e[0], sd * e[1], sd * e[2]];
+        else e = [-(e[0] - pigOffset[jn[0]]), sd * e[1], sd * e[2]];
+      } else e = cardanZXY(M3.mul(M3.T(RA[rf]), RA[sg]));
       out.angles[jn].a[f] = e[0]; out.angles[jn].b[f] = e[1]; out.angles[jn].g[f] = e[2];
     }
   }
@@ -1611,7 +1652,7 @@ function computeLowerBody(ds, params) {
   const ranges = {};
   for (const jn in out.angles) { ranges[jn] = {}; for (const c of ['a', 'b', 'g']) { let lo = Infinity, hi = -Infinity; for (let f = 0; f < nF; f++) { const v = out.angles[jn][c][f]; if (v === v) { if (v < lo) lo = v; if (v > hi) hi = v; } } ranges[jn][c] = [lo, hi]; } }
   const fitSummary = {}; for (const k of segNames) { const st = fitStats[k]; fitSummary[k] = { meanRms: st.n ? st.sum / st.n : NaN, maxRms: st.max, dropped: st.dropped, short: st.short }; }
-  return { ok: true, markerSet: setId, markerSetLabel: LB_SETS[setId].label, staticSource: sameStatic ? 'trial' : (sds.name || 'static file'), measured, fitSummary, params: Object.assign({}, p, { staticDs: undefined }), anthro: p.anthro || null, warnings, angles: out.angles, frames: out.frames, jc: out.jc, ranges, upTilt, staticMove: maxMove, landmarks: L, staticRange: [s0, s1 - 1], asisDistance: D, segNames };
+  return { ok: true, convention: PIG ? 'pig' : 'v3d', pigOffset, markerSet: setId, markerSetLabel: LB_SETS[setId].label, staticSource: sameStatic ? 'trial' : (sds.name || 'static file'), measured, fitSummary, params: Object.assign({}, p, { staticDs: undefined }), anthro: p.anthro || null, warnings, angles: out.angles, frames: out.frames, jc: out.jc, ranges, upTilt, staticMove: maxMove, landmarks: L, staticRange: [s0, s1 - 1], asisDistance: D, segNames };
 }
 
 /* ---------------------------------------------------------------- Force-analysis engine
@@ -1959,7 +2000,7 @@ const FA = (() => {
   return { butter, filtfilt, butterLowpass, findQuietWindow, detectPhases, calcMetrics, landingImpact, impactRows, analyzePlates, G };
 })();
 
-const api = { FA, computeLowerBody, detectLBSet, LB_SETS, estimateAnthropometry, rigidFit, cardanZXY, rotZXY, LB_JOINTS, LB_DEFAULTS, readC3D, makeSyntheticCMJ, defaultLinks, splitLabel, sideOf, validRatio, MocapViewer, ChartView, AXIS, SIDE_COLOR, finishDataset };
+const api = { FA, cardanYXZ, rotYXZ, computeLowerBody, detectLBSet, LB_SETS, estimateAnthropometry, rigidFit, cardanZXY, rotZXY, LB_JOINTS, LB_DEFAULTS, readC3D, makeSyntheticCMJ, defaultLinks, splitLabel, sideOf, validRatio, MocapViewer, ChartView, AXIS, SIDE_COLOR, finishDataset };
 if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.MocapEngine = api;
 })(typeof window !== 'undefined' ? window : globalThis);
 
@@ -1989,7 +2030,7 @@ const I18N_FRAG = [
   ['ประมาณการและนำไปใช้', 'Estimate & Apply'], ['ส่วนสูง (cm)', 'Height (cm)'], ['น้ำหนัก (kg)', 'Weight (kg)'],
   ['* ค่า width เป็นเพียงค่าประมาณการเบื้องต้น แนะนำให้ใช้คาลิปเปอร์วัดจริง', '* Knee/ankle widths are rough initial estimates. Direct measurement is strongly recommended.'],
   ['มุมข้อต่อ (แบบ V3D)', 'Joint angles (V3D-style)'], ['คำนวณมุมข้อต่อ', 'Compute joint angles'], ['มุมข้อต่อ', 'Joint angles'], ['ส่งออก CSV', 'Export CSV'],
-  ['โหลดไฟล์ static แยก', 'Load separate static file'], ['ใช้ trial นี้เป็น static', 'Use this trial as static'], ['Static: ใช้ frame ต้นของ trial ที่เปิดอยู่', 'Static: uses the first frames of the open trial'],
+  ['Plug-in Gait style · Y-X-Z (ชุด 18 marker)', 'Plug-in Gait style · Y-X-Z (18-marker set)'], ['โหลดไฟล์ static แยก', 'Load separate static file'], ['ใช้ trial นี้เป็น static', 'Use this trial as static'], ['Static: ใช้ frame ต้นของ trial ที่เปิดอยู่', 'Static: uses the first frames of the open trial'],
   ['ลบค่าเฉลี่ยช่วง static (zero offset)', 'Subtract static-period mean (zero offset)'], ['จำนวน frame', 'No. of frames'], ['Static: frame เริ่ม', 'Static: start frame'],
   ['ค่า width เป็น placeholder ต้องวัดจริง', 'width values are placeholders — measure real ones'], ['ยังไม่เทียบกับ Visual3D', 'not yet compared with Visual3D'],
   ['ค้นหาชื่อ', 'Search name'], ['ค้นหา marker', 'Search markers'], ['คีย์ลัด', 'Shortcuts'], ['ยกเลิกโหมด link', 'cancel link mode'], ['±1 เฟรม', '±1 frame'], ['±10', '±10'],
@@ -2241,8 +2282,9 @@ function updatePanel(P) {
   } else if (T === 'ang') {
     const js = $('jsel' + S), A = kin && kin.angles[js.value];
     if (!A) { c.set(Object.assign({ series: [], empty: T('กด “คำนวณมุมข้อต่อ” ก่อน') }, base)); title('—'); return; }
-    c.set(Object.assign({ series: [{ name: 'X flex/ext', color: E.AXIS.x, data: A.a }, { name: 'Y ab/add', color: E.AXIS.y, data: A.b }, { name: 'Z axial', color: E.AXIS.z, data: A.g }], dec: 1 }, base));
-    title(js.selectedOptions[0].textContent + ' · Cardan Z-X-Y (°)' + (kin.params.normalize ? ' · ลบ offset static' : ''));
+    const pg = kin && kin.convention === 'pig';
+    c.set(Object.assign({ series: pg ? [{ name: 'X flex(+)/ext', color: E.AXIS.x, data: A.a }, { name: 'Y add/varus(+)', color: E.AXIS.y, data: A.b }, { name: 'Z int.rot(+)', color: E.AXIS.z, data: A.g }] : [{ name: 'X flex/ext', color: E.AXIS.x, data: A.a }, { name: 'Y ab/add', color: E.AXIS.y, data: A.b }, { name: 'Z axial', color: E.AXIS.z, data: A.g }], dec: 1 }, base));
+    title(js.selectedOptions[0].textContent + (pg ? ' · Plug-in Gait style Y-X-Z (°)' : ' · Cardan Z-X-Y (°)') + (kin.params.normalize ? ' · ลบ offset static' : ''));
   } else {
     const pl = ds.plates.find(p => p.supported);
     if (!pl) { c.set(Object.assign({ series: [], empty: T('ไม่มีข้อมูล force plate') }, base)); title('—'); return; }
@@ -2357,6 +2399,7 @@ function runAngles() {
     markerR: num('aMR'),
     normalize: $('aNorm').checked,
     staticDs,
+    convention: $('aConv').value,
     anthro
   };
   const r = E.computeLowerBody(ds, p), n = $('angNote');
@@ -2366,7 +2409,7 @@ function runAngles() {
   $('tabA').disabled = false; $('tabA2').disabled = false; $('bCsv').disabled = false;
   const fmt = j => { const g = r.ranges[j].a; return j + ' ' + g[0].toFixed(0) + '…' + g[1].toFixed(0) + '°'; };
   n.className = 'note' + (r.warnings.length ? ' warn' : '');
-  n.textContent = 'ชุด marker: ' + r.markerSetLabel + (r.measured ? ' (width วัดจาก marker medial ในไฟล์ ช่อง width ไม่ถูกใช้)' : '') + ' · static: ' + (r.staticSource === 'trial' ? 'trial นี้' : r.staticSource) + ' f' + r.staticRange[0] + '–' + r.staticRange[1] + ' (marker ขยับสูงสุด ' + (r.staticMove * 1000).toFixed(1) + ' mm) · flex: ' + ['RHip', 'RKnee', 'RAnkle', 'LHip', 'LKnee', 'LAnkle'].map(fmt).join(' · ') + (r.warnings.length ? ' · ⚠ ' + r.warnings.join(' · ') : '') + ' · ยังไม่เทียบกับ Visual3D';
+  n.textContent = (r.convention === 'pig' ? 'Plug-in Gait style (Y-X-Z; + = flexion/dorsiflexion, adduction/varus, internal rot; ankle หัก static offset R ' + r.pigOffset.R.toFixed(1) + '° / L ' + r.pigOffset.L.toFixed(1) + '°; virtual TIB) · ' : '') + 'ชุด marker: ' + r.markerSetLabel + (r.measured ? ' (width วัดจาก marker medial ในไฟล์ ช่อง width ไม่ถูกใช้)' : '') + ' · static: ' + (r.staticSource === 'trial' ? 'trial นี้' : r.staticSource) + ' f' + r.staticRange[0] + '–' + r.staticRange[1] + ' (marker ขยับสูงสุด ' + (r.staticMove * 1000).toFixed(1) + ' mm) · flex: ' + ['RHip', 'RKnee', 'RAnkle', 'LHip', 'LKnee', 'LAnkle'].map(fmt).join(' · ') + (r.warnings.length ? ' · ⚠ ' + r.warnings.join(' · ') : '') + ' · ยังไม่เทียบกับ Visual3D';
   setTab('ang');
 }
 if ($('bApplyAnthro')) $('bApplyAnthro').addEventListener('click', () => updateAnthroUI(true));
@@ -2398,14 +2441,14 @@ $('oSegs').addEventListener('input', e => { viewer.opt.segs = e.target.checked; 
 $('bCsv').addEventListener('click', () => {
   if (!kin) return;
   const J = ['RHip', 'RKnee', 'RAnkle', 'LHip', 'LKnee', 'LAnkle'], h = ['frame', 'time_s'];
-  J.forEach(j => ['X_flex', 'Y_abd', 'Z_rot'].forEach(c => h.push(j + '_' + c)));
+  J.forEach(j => (kin.convention === 'pig' ? ['flex', 'add', 'introt'] : ['X_flex', 'Y_abd', 'Z_rot']).forEach(c => h.push(j + '_' + c)));
   const rows = [h.join(',')];
   for (let f = 0; f < ds.nFrames; f++) {
     const r = [f, (f / ds.rate).toFixed(4)];
     J.forEach(j => ['a', 'b', 'g'].forEach(c => { const v = kin.angles[j][c][f]; r.push(v === v ? v.toFixed(3) : ''); }));
     rows.push(r.join(','));
   }
-  saveText((ds.name || 'take').replace(/\.c3d$/i, '') + '_JointAngles_ZXY.csv', rows.join('\r\n'));
+  saveText((ds.name || 'take').replace(/\.c3d$/i, '') + '_JointAngles_' + (kin.convention === 'pig' ? 'PiGstyle' : 'ZXY') + '.csv', rows.join('\r\n'));
 });
 
 async function saveText(fname, text) {

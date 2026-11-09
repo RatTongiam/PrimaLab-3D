@@ -7,6 +7,8 @@ Browser-based mocap viewer and analysis tool by Prima Motion. Opens C3D files lo
 - **3D Viewer**: Canvas2D orbit camera, marker trails, skeleton links, segment shapes, and ground reaction force (GRF) vectors.
 - **Anthropometry & Subject Estimation**: Enter height (cm), body mass (kg), and sex to estimate initial knee/ankle widths (used for virtual medial markers and joint centers) and body mass (for CMJ force analysis). Also displays reference segment lengths (Winter 2009) and segment masses (De Leva 1996).
 - **Kinematics**: Visual3D-style lower-body Cardan Z-X-Y joint angles (Hip, Knee, Ankle, Pelvis).
+- **Marker sets**: Conventional Lower 16 (TIB wand) or Lower 18 (real medial KNEM/ANKM, no TIB; robust shank fit with outlier-marker rejection, virtual TIB for the shank frame). Separate static C3D supported.
+- **Plug-in Gait style mode** (Lower 18 only): X anterior / Y left / Z up segment axes, Euler Y-X-Z, flexion/dorsiflexion, adduction/varus and internal rotation positive, static foot offset subtracted. Not yet compared with Vicon PiG or Visual3D.
 - **Force Analysis (CMJ)**: Automated quiet-standing window, phase segmentation (unweighting, braking, propulsive, flight, landing), metrics, and landing impact frequency check against plate natural frequency ($f_n$).
 - **Bilingual**: Thai (TH) and English (EN) with seamless language switching.
 

@@ -981,6 +981,15 @@ function rigidFit(A, B) {
 function cardanZXY(R) {
   return [Math.atan2(-R[1], R[4]) / D2R, Math.asin(clamp(R[7], -1, 1)) / D2R, Math.atan2(-R[6], R[8]) / D2R];
 }
+/* R = Ry(a) Rx(b) Rz(g)  ->  degrees  (Plug-in Gait style: a about lateral Y, b about anterior X, g about vertical Z) */
+function cardanYXZ(R) {
+  return [Math.atan2(R[2], R[8]) / D2R, Math.asin(clamp(-R[5], -1, 1)) / D2R, Math.atan2(R[3], R[4]) / D2R];
+}
+function rotYXZ(aDeg, bDeg, gDeg) {
+  const a = aDeg * D2R, b = bDeg * D2R, g = gDeg * D2R, Ry = [Math.cos(a), 0, Math.sin(a), 0, 1, 0, -Math.sin(a), 0, Math.cos(a)],
+    Rx = [1, 0, 0, 0, Math.cos(b), -Math.sin(b), 0, Math.sin(b), Math.cos(b)], Rz = [Math.cos(g), -Math.sin(g), 0, Math.sin(g), Math.cos(g), 0, 0, 0, 1];
+  return M3.mul(M3.mul(Ry, Rx), Rz);
+}
 function rotZXY(aDeg, bDeg, gDeg) {
   const a = aDeg * D2R, b = bDeg * D2R, g = gDeg * D2R, Rz = [Math.cos(a), -Math.sin(a), 0, Math.sin(a), Math.cos(a), 0, 0, 0, 1],
     Rx = [1, 0, 0, 0, Math.cos(b), -Math.sin(b), 0, Math.sin(b), Math.cos(b)], Ry = [Math.cos(g), 0, Math.sin(g), 0, 1, 0, -Math.sin(g), 0, Math.cos(g)];
@@ -988,7 +997,7 @@ function rotZXY(aDeg, bDeg, gDeg) {
 }
 
 const LB_MARKERS = ['LASI', 'RASI', 'LPSI', 'RPSI', 'LKNE', 'RKNE', 'LTHI', 'RTHI', 'LANK', 'RANK', 'LTIB', 'RTIB', 'LTOE', 'RTOE', 'LHEE', 'RHEE'];
-const LB_DEFAULTS = { kneeW: 0.10, ankleW: 0.07, markerR: 0.007, staticStart: 0, staticN: 10, normalize: false, fitTol: 0.015 };
+const LB_DEFAULTS = { kneeW: 0.10, ankleW: 0.07, markerR: 0.007, staticStart: 0, staticN: 10, normalize: false, fitTol: 0.015, convention: 'v3d' };
 /* Marker sets for the lower-body model.
    conv16 : Conventional Lower 16 (tibia wand TIB, virtual medial points from caliper widths)
    bad18  : 18 markers with real medial KNEM/ANKM, no TIB (e.g. badminton set). Joint centres = midpoint of lateral/medial,
@@ -1127,6 +1136,29 @@ function computeLowerBody(ds, params) {
   // names: thigh/shank/foot tracking uses SEG keys RTH,RSK,RFT / LTH,LSK,LFT; fix keys
   const fix = { RTH: 'RTH', RSK: 'RSK', RFT: 'RFT', LTH: 'LTH', LSK: 'LSK', LFT: 'LFT', RPV: 'RPV' };
   const segNames = Object.keys(fix);
+ /* ---- Plug-in Gait style convention (bad18 only): segment axes X anterior, Y left, Z proximal(up); angles Euler Y-X-Z.
+        Shank has no TIB marker: a virtual TIB (midpoint of lateral KNE-ANK in static) fixes the shank frontal plane, as the real TIB does in PiG.
+        The virtual TIB is not an independent measurement; shank pose comes from the robust fit of KNE/KNEM/ANK/ANKM. */
+  const PIG = p.convention === 'pig';
+  if (PIG && !REAL_MEDIAL) return { ok: false, error: 'โหมด Plug-in Gait style ใช้ได้กับชุด 18 marker (KNEM/ANKM) เท่านั้น' };
+  let pigOffset = null;
+  if (PIG) {
+    const orth = (v, z) => V.norm(V.sub(v, V.mul(z, V.dot(v, z))));
+    const mk = (o, z, leftRef) => { const Y = orth(leftRef, z); return { o, R: M3.cols(V.cross(Y, z), Y, z) }; };
+    const Ypel = V.norm(V.sub(S.LASI, S.RASI)), Xpel = V.norm(V.sub(apRaw, V.mul(Ypel, V.dot(apRaw, Ypel))));
+    SEG.RPV.frame = { o: V.mid(L.RHJC, L.LHJC), R: M3.cols(Xpel, Ypel, V.cross(Xpel, Ypel)) };
+    L.RTIBv = V.mid(S.RKNE, S.RANK); L.LTIBv = V.mid(S.LKNE, S.LANK);
+    for (const s of ['R', 'L']) {
+      const R_ = s === 'R', lat = (a, b) => V.sub(R_ ? S[b] : S[a], R_ ? S[a] : S[b]);   // pointing to subject's left
+      SEG[s + 'TH'].frame = mk(L[s + 'HJC'], V.norm(V.sub(L[s + 'HJC'], L[s + 'KJC'])), lat(s + 'KNE', s + 'KNEM'));
+      const l = V.sub(L[s + 'TIBv'], V.mid(L[s + 'KJC'], L[s + 'AJC']));
+      SEG[s + 'SK'].frame = mk(L[s + 'KJC'], V.norm(V.sub(L[s + 'KJC'], L[s + 'AJC'])), R_ ? V.mul(l, -1) : l);
+      SEG[s + 'FT'].frame = mk(L[s + 'AJC'], V.norm(V.sub(L[s + 'AJC'], S[s + 'TOE'])), lat(s + 'ANK', s + 'ANKM'));
+    }
+    // static plantar/dorsiflexion offset of the foot (as PiG's static calibration): foot-vs-shank angle in the static pose
+    pigOffset = {};
+    for (const s of ['R', 'L']) pigOffset[s] = cardanYXZ(M3.mul(M3.T(SEG[s + 'SK'].frame.R), SEG[s + 'FT'].frame.R))[0];
+  }
   const stat = n => (n in S ? S[n] : L[n]);
   for (const k of segNames) SEG[k].A = SEG[k].track.map(stat);
   /* static frame sanity: Y axis vs lab up */
@@ -1184,7 +1216,15 @@ function computeLowerBody(ds, params) {
     for (const [jn, sg, rf] of LB_JOINTS) {
       if (!out.angles[jn]) out.angles[jn] = { a: new Float32Array(nF).fill(NaN), b: new Float32Array(nF).fill(NaN), g: new Float32Array(nF).fill(NaN) };
       if (!RA[sg] || !RA[rf]) { if (jn === 'RHip') skipped++; continue; }
-      const e = cardanZXY(M3.mul(M3.T(RA[rf]), RA[sg]));
+      let e;
+      if (PIG) {
+        e = cardanYXZ(M3.mul(M3.T(RA[rf]), RA[sg]));
+        const left = jn[0] === 'L', t = jn.slice(1), sd = left ? -1 : 1;
+        // output: a = flexion(+) / dorsiflexion(+), b = adduction(+) / varus(+), g = internal rotation(+)
+        if (t === 'Hip') e = [-e[0], sd * e[1], sd * e[2]];
+        else if (t === 'Knee') e = [e[0], sd * e[1], sd * e[2]];
+        else e = [-(e[0] - pigOffset[jn[0]]), sd * e[1], sd * e[2]];
+      } else e = cardanZXY(M3.mul(M3.T(RA[rf]), RA[sg]));
       out.angles[jn].a[f] = e[0]; out.angles[jn].b[f] = e[1]; out.angles[jn].g[f] = e[2];
     }
   }
@@ -1206,7 +1246,7 @@ function computeLowerBody(ds, params) {
   const ranges = {};
   for (const jn in out.angles) { ranges[jn] = {}; for (const c of ['a', 'b', 'g']) { let lo = Infinity, hi = -Infinity; for (let f = 0; f < nF; f++) { const v = out.angles[jn][c][f]; if (v === v) { if (v < lo) lo = v; if (v > hi) hi = v; } } ranges[jn][c] = [lo, hi]; } }
   const fitSummary = {}; for (const k of segNames) { const st = fitStats[k]; fitSummary[k] = { meanRms: st.n ? st.sum / st.n : NaN, maxRms: st.max, dropped: st.dropped, short: st.short }; }
-  return { ok: true, markerSet: setId, markerSetLabel: LB_SETS[setId].label, staticSource: sameStatic ? 'trial' : (sds.name || 'static file'), measured, fitSummary, params: Object.assign({}, p, { staticDs: undefined }), anthro: p.anthro || null, warnings, angles: out.angles, frames: out.frames, jc: out.jc, ranges, upTilt, staticMove: maxMove, landmarks: L, staticRange: [s0, s1 - 1], asisDistance: D, segNames };
+  return { ok: true, convention: PIG ? 'pig' : 'v3d', pigOffset, markerSet: setId, markerSetLabel: LB_SETS[setId].label, staticSource: sameStatic ? 'trial' : (sds.name || 'static file'), measured, fitSummary, params: Object.assign({}, p, { staticDs: undefined }), anthro: p.anthro || null, warnings, angles: out.angles, frames: out.frames, jc: out.jc, ranges, upTilt, staticMove: maxMove, landmarks: L, staticRange: [s0, s1 - 1], asisDistance: D, segNames };
 }
 
 /* ---------------------------------------------------------------- Force-analysis engine
@@ -1554,6 +1594,6 @@ const FA = (() => {
   return { butter, filtfilt, butterLowpass, findQuietWindow, detectPhases, calcMetrics, landingImpact, impactRows, analyzePlates, G };
 })();
 
-const api = { FA, computeLowerBody, detectLBSet, LB_SETS, estimateAnthropometry, rigidFit, cardanZXY, rotZXY, LB_JOINTS, LB_DEFAULTS, readC3D, makeSyntheticCMJ, defaultLinks, splitLabel, sideOf, validRatio, MocapViewer, ChartView, AXIS, SIDE_COLOR, finishDataset };
+const api = { FA, cardanYXZ, rotYXZ, computeLowerBody, detectLBSet, LB_SETS, estimateAnthropometry, rigidFit, cardanZXY, rotZXY, LB_JOINTS, LB_DEFAULTS, readC3D, makeSyntheticCMJ, defaultLinks, splitLabel, sideOf, validRatio, MocapViewer, ChartView, AXIS, SIDE_COLOR, finishDataset };
 if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.MocapEngine = api;
 })(typeof window !== 'undefined' ? window : globalThis);

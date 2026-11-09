@@ -167,8 +167,9 @@ function updatePanel(P) {
   } else if (T === 'ang') {
     const js = $('jsel' + S), A = kin && kin.angles[js.value];
     if (!A) { c.set(Object.assign({ series: [], empty: T('กด “คำนวณมุมข้อต่อ” ก่อน') }, base)); title('—'); return; }
-    c.set(Object.assign({ series: [{ name: 'X flex/ext', color: E.AXIS.x, data: A.a }, { name: 'Y ab/add', color: E.AXIS.y, data: A.b }, { name: 'Z axial', color: E.AXIS.z, data: A.g }], dec: 1 }, base));
-    title(js.selectedOptions[0].textContent + ' · Cardan Z-X-Y (°)' + (kin.params.normalize ? ' · ลบ offset static' : ''));
+    const pg = kin && kin.convention === 'pig';
+    c.set(Object.assign({ series: pg ? [{ name: 'X flex(+)/ext', color: E.AXIS.x, data: A.a }, { name: 'Y add/varus(+)', color: E.AXIS.y, data: A.b }, { name: 'Z int.rot(+)', color: E.AXIS.z, data: A.g }] : [{ name: 'X flex/ext', color: E.AXIS.x, data: A.a }, { name: 'Y ab/add', color: E.AXIS.y, data: A.b }, { name: 'Z axial', color: E.AXIS.z, data: A.g }], dec: 1 }, base));
+    title(js.selectedOptions[0].textContent + (pg ? ' · Plug-in Gait style Y-X-Z (°)' : ' · Cardan Z-X-Y (°)') + (kin.params.normalize ? ' · ลบ offset static' : ''));
   } else {
     const pl = ds.plates.find(p => p.supported);
     if (!pl) { c.set(Object.assign({ series: [], empty: T('ไม่มีข้อมูล force plate') }, base)); title('—'); return; }
@@ -283,6 +284,7 @@ function runAngles() {
     markerR: num('aMR'),
     normalize: $('aNorm').checked,
     staticDs,
+    convention: $('aConv').value,
     anthro
   };
   const r = E.computeLowerBody(ds, p), n = $('angNote');
@@ -292,7 +294,7 @@ function runAngles() {
   $('tabA').disabled = false; $('tabA2').disabled = false; $('bCsv').disabled = false;
   const fmt = j => { const g = r.ranges[j].a; return j + ' ' + g[0].toFixed(0) + '…' + g[1].toFixed(0) + '°'; };
   n.className = 'note' + (r.warnings.length ? ' warn' : '');
-  n.textContent = 'ชุด marker: ' + r.markerSetLabel + (r.measured ? ' (width วัดจาก marker medial ในไฟล์ ช่อง width ไม่ถูกใช้)' : '') + ' · static: ' + (r.staticSource === 'trial' ? 'trial นี้' : r.staticSource) + ' f' + r.staticRange[0] + '–' + r.staticRange[1] + ' (marker ขยับสูงสุด ' + (r.staticMove * 1000).toFixed(1) + ' mm) · flex: ' + ['RHip', 'RKnee', 'RAnkle', 'LHip', 'LKnee', 'LAnkle'].map(fmt).join(' · ') + (r.warnings.length ? ' · ⚠ ' + r.warnings.join(' · ') : '') + ' · ยังไม่เทียบกับ Visual3D';
+  n.textContent = (r.convention === 'pig' ? 'Plug-in Gait style (Y-X-Z; + = flexion/dorsiflexion, adduction/varus, internal rot; ankle หัก static offset R ' + r.pigOffset.R.toFixed(1) + '° / L ' + r.pigOffset.L.toFixed(1) + '°; virtual TIB) · ' : '') + 'ชุด marker: ' + r.markerSetLabel + (r.measured ? ' (width วัดจาก marker medial ในไฟล์ ช่อง width ไม่ถูกใช้)' : '') + ' · static: ' + (r.staticSource === 'trial' ? 'trial นี้' : r.staticSource) + ' f' + r.staticRange[0] + '–' + r.staticRange[1] + ' (marker ขยับสูงสุด ' + (r.staticMove * 1000).toFixed(1) + ' mm) · flex: ' + ['RHip', 'RKnee', 'RAnkle', 'LHip', 'LKnee', 'LAnkle'].map(fmt).join(' · ') + (r.warnings.length ? ' · ⚠ ' + r.warnings.join(' · ') : '') + ' · ยังไม่เทียบกับ Visual3D';
   setTab('ang');
 }
 if ($('bApplyAnthro')) $('bApplyAnthro').addEventListener('click', () => updateAnthroUI(true));
@@ -324,14 +326,14 @@ $('oSegs').addEventListener('input', e => { viewer.opt.segs = e.target.checked; 
 $('bCsv').addEventListener('click', () => {
   if (!kin) return;
   const J = ['RHip', 'RKnee', 'RAnkle', 'LHip', 'LKnee', 'LAnkle'], h = ['frame', 'time_s'];
-  J.forEach(j => ['X_flex', 'Y_abd', 'Z_rot'].forEach(c => h.push(j + '_' + c)));
+  J.forEach(j => (kin.convention === 'pig' ? ['flex', 'add', 'introt'] : ['X_flex', 'Y_abd', 'Z_rot']).forEach(c => h.push(j + '_' + c)));
   const rows = [h.join(',')];
   for (let f = 0; f < ds.nFrames; f++) {
     const r = [f, (f / ds.rate).toFixed(4)];
     J.forEach(j => ['a', 'b', 'g'].forEach(c => { const v = kin.angles[j][c][f]; r.push(v === v ? v.toFixed(3) : ''); }));
     rows.push(r.join(','));
   }
-  saveText((ds.name || 'take').replace(/\.c3d$/i, '') + '_JointAngles_ZXY.csv', rows.join('\r\n'));
+  saveText((ds.name || 'take').replace(/\.c3d$/i, '') + '_JointAngles_' + (kin.convention === 'pig' ? 'PiGstyle' : 'ZXY') + '.csv', rows.join('\r\n'));
 });
 
 async function saveText(fname, text) {
