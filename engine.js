@@ -919,15 +919,14 @@ class ChartView {
 }
 
 
-/* ---------------------------------------------------------------- lower-body kinematics (Visual3D-style, independent implementation)
-   Mirrors the logic of ConvLower16_v4_prefixed.mdh:
+/* ---------------------------------------------------------------- lower-body kinematics (independent implementation)
    - Coda-type pelvis (ASIS + sacrum mid-PSIS), HJC by Bell regression (0.36 / -0.19 / -0.30 x ASIS distance)
    - virtual medial knee/ankle = lateral marker shifted by (width + 2*marker radius) along static pelvis ML
-   - Visual_3D-type thigh/shank/foot: axial = proximal - distal, ML from lateral-medial markers (foot: ankle marker)
+   - thigh/shank/foot: axial = proximal - distal, ML from lateral-medial markers (foot: ankle marker)
    - segment local axes: X anterior, Y axial (up), Z medio-lateral toward subject's RIGHT for both sides
    - static = mean of the first N frames; motion = rigid fit of the tracking set (Horn), anatomical frame carried along
-   - JOINT_ANGLE: Cardan Z-X-Y, R = Rz(a) Rx(b) Ry(g); a = about Z (flex/ext), b = about X (ab/adduction), g = about Y (axial)
-   Whether Visual3D reproduces these numbers exactly is NOT verified: compare with its export. */
+   - joint angle: Cardan Z-X-Y, R = Rz(a) Rx(b) Ry(g); a = about Z (flex/ext), b = about X (ab/adduction), g = about Y (axial)
+   Not cross-checked against other software: compare with an independent reference before relying on the numbers. */
 const V = {
   sub: (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]], add: (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
   mul: (a, s) => [a[0] * s, a[1] * s, a[2] * s], dot: (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2],
@@ -997,7 +996,7 @@ function rotZXY(aDeg, bDeg, gDeg) {
 }
 
 const LB_MARKERS = ['LASI', 'RASI', 'LPSI', 'RPSI', 'LKNE', 'RKNE', 'LTHI', 'RTHI', 'LANK', 'RANK', 'LTIB', 'RTIB', 'LTOE', 'RTOE', 'LHEE', 'RHEE'];
-const LB_DEFAULTS = { kneeW: 0.10, ankleW: 0.07, markerR: 0.007, staticStart: 0, staticN: 10, normalize: false, fitTol: 0.015, convention: 'v3d' };
+const LB_DEFAULTS = { kneeW: 0.10, ankleW: 0.07, markerR: 0.007, staticStart: 0, staticN: 10, normalize: false, fitTol: 0.015, convention: 'zxy' };
 /* Marker sets for the lower-body model.
    conv16 : Conventional Lower 16 (tibia wand TIB, virtual medial points from caliper widths)
    bad18  : 18 markers with real medial KNEM/ANKM, no TIB (e.g. badminton set). Joint centres = midpoint of lateral/medial,
@@ -1246,7 +1245,7 @@ function computeLowerBody(ds, params) {
   const ranges = {};
   for (const jn in out.angles) { ranges[jn] = {}; for (const c of ['a', 'b', 'g']) { let lo = Infinity, hi = -Infinity; for (let f = 0; f < nF; f++) { const v = out.angles[jn][c][f]; if (v === v) { if (v < lo) lo = v; if (v > hi) hi = v; } } ranges[jn][c] = [lo, hi]; } }
   const fitSummary = {}; for (const k of segNames) { const st = fitStats[k]; fitSummary[k] = { meanRms: st.n ? st.sum / st.n : NaN, maxRms: st.max, dropped: st.dropped, short: st.short }; }
-  return { ok: true, convention: PIG ? 'pig' : 'v3d', pigOffset, markerSet: setId, markerSetLabel: LB_SETS[setId].label, staticSource: sameStatic ? 'trial' : (sds.name || 'static file'), measured, fitSummary, params: Object.assign({}, p, { staticDs: undefined }), anthro: p.anthro || null, warnings, angles: out.angles, frames: out.frames, jc: out.jc, ranges, upTilt, staticMove: maxMove, landmarks: L, staticRange: [s0, s1 - 1], asisDistance: D, segNames };
+  return { ok: true, convention: PIG ? 'pig' : 'zxy', pigOffset, markerSet: setId, markerSetLabel: LB_SETS[setId].label, staticSource: sameStatic ? 'trial' : (sds.name || 'static file'), measured, fitSummary, params: Object.assign({}, p, { staticDs: undefined }), anthro: p.anthro || null, warnings, angles: out.angles, frames: out.frames, jc: out.jc, ranges, upTilt, staticMove: maxMove, landmarks: L, staticRange: [s0, s1 - 1], asisDistance: D, segNames };
 }
 
 /* ---------------------------------------------------------------- Force-analysis engine

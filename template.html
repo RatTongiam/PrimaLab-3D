@@ -356,7 +356,7 @@ kbd { font: 500 11px var(--mono); padding: 1px 5px; border: 1px solid var(--line
         <p class="note warn" id="subNote">* ค่า width เป็นเพียงค่าประมาณการเบื้องต้น แนะนำให้ใช้คาลิปเปอร์วัดจริง</p>
       </section>
       <section class="card" aria-labelledby="hAng">
-        <h2 id="hAng">มุมข้อต่อ (แบบ V3D)</h2>
+        <h2 id="hAng">มุมข้อต่อ</h2>
         <div class="angform">
           <label>Static: frame เริ่ม <input id="aS0" type="number" min="0" value="0"></label>
           <label>จำนวน frame <input id="aSN" type="number" min="1" value="10"></label>
@@ -365,7 +365,7 @@ kbd { font: 500 11px var(--mono); padding: 1px 5px; border: 1px solid var(--line
           <label>Ankle width R (m) <input id="aAR" type="number" step="0.001" value="0.070"></label>
           <label>Ankle width L (m) <input id="aAL" type="number" step="0.001" value="0.070"></label>
           <label>Marker radius (m) <input id="aMR" type="number" step="0.001" value="0.007"></label>
-          <label class="wide">Convention <select id="aConv"><option value="v3d">V3D · Cardan Z-X-Y</option><option value="pig">Plug-in Gait style · Y-X-Z (ชุด 18 marker)</option></select></label>
+          <label class="wide">Convention <select id="aConv"><option value="zxy">Cardan Z-X-Y</option><option value="pig">Plug-in Gait style · Y-X-Z (ชุด 18 marker)</option></select></label>
           <label class="wide"><input id="aNorm" type="checkbox"> ลบค่าเฉลี่ยช่วง static (zero offset)</label>
         </div>
         <div class="card-acts">
@@ -378,7 +378,7 @@ kbd { font: 500 11px var(--mono); padding: 1px 5px; border: 1px solid var(--line
           <button id="bAng" class="btn primary" type="button">คำนวณมุมข้อต่อ</button>
           <button id="bCsv" class="btn" type="button" disabled>ส่งออก CSV</button>
         </div>
-        <p class="note" id="angNote">Cardan Z-X-Y · X=flex/ext, Y=ab/adduction, Z=axial · ค่า width เป็น placeholder ต้องวัดจริง · ยังไม่เทียบกับ Visual3D</p>
+        <p class="note" id="angNote">Cardan Z-X-Y · X=flex/ext, Y=ab/adduction, Z=axial · ค่า width เป็น placeholder ต้องวัดจริง · ยังไม่ได้ตรวจเทียบกับซอฟต์แวร์อื่น</p>
       </section>
       <section class="card" aria-labelledby="hMk">
         <h2 id="hMk">Marker</h2>
